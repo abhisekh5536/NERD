@@ -169,8 +169,15 @@ function executeReplaceBlock(editor: Editor, args: Record<string, unknown>): unk
     }
   }
 
+  const preservedAttrs: Record<string, unknown> = {}
+  if (found.node.attrs.blockId) {
+    preservedAttrs.blockId = found.node.attrs.blockId
+  }
   if (found.node.type.name === 'heading') {
-    newJson.attrs = { level: found.node.attrs.level ?? 1 }
+    preservedAttrs.level = found.node.attrs.level ?? 1
+  }
+  if (Object.keys(preservedAttrs).length > 0) {
+    newJson.attrs = preservedAttrs
   }
 
   const result = stageReplace(editor, blockId, newJson, description)

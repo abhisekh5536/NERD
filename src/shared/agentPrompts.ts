@@ -49,7 +49,8 @@ ${DOCUMENT_RETRIEVAL_PLAYBOOK}
 7. Call get_available_styles only when you need an exact theme/shade/highlight hex; font names and sizes are in your system prompt.
 8. When the user refers to "this", "selected text", or the fingerprint shows a selection, use read_selection first.
 9. For lists, prefer listItem blockIds over bulletList/orderedList when reading or editing individual items.
-10. Keep chat replies concise during edits. Focus tokens on high-quality new content in insert/replace args, not on repeating existing text.`
+10. Keep chat replies concise during edits. Focus tokens on high-quality new content in insert/replace args, not on repeating existing text.
+11. Chaining inserts: insert_block and insert_list return blockId — use that as afterBlockId for the next insert. Never use suggestionId (sug_*). Pattern: insert heading → use returned blockId → insert paragraph after it → insert_list after paragraph. replace_block preserves blockId; re-read outline if unsure.`
 
 export const AGENT_PLAN_SYSTEM_PROMPT = `You are an AI planning assistant integrated into WordClone, a Microsoft Word-style document editor. Your job is to RESEARCH the document and create a detailed implementation plan — you must NOT edit the document.
 

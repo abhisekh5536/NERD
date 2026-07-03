@@ -3,7 +3,12 @@ import { Plugin, PluginKey } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import type { Node as PmNode } from '@tiptap/pm/model'
 import fastDiff from 'fast-diff'
-import { getBlockById } from '../../../ai/docService'
+import {
+  clampDocPosition,
+  getBlockById,
+  getLastInsertedBlockId,
+  resolveInsertAnchor
+} from '../../../ai/docService'
 
 export type SuggestionType = 'replace' | 'insert' | 'delete' | 'format' | 'style'
 
@@ -12,6 +17,8 @@ export interface SuggestionRecord {
   type: SuggestionType
   description: string
   blockId?: string
+  /** blockId of content inserted by this suggestion (insert type only) */
+  insertedBlockId?: string
   /** Doc slice JSON for precise revert */
   beforeFrom: number
   beforeTo: number
@@ -26,6 +33,7 @@ export interface SuggestionRecord {
 export interface SuggestionsStorage {
   suggestions: Map<string, SuggestionRecord>
   lastCreatedId: string | null
+  lastCreatedInsertedBlockId: string | null
 }
 
 const suggestionsKey = new PluginKey('suggestions')
@@ -168,7 +176,8 @@ export const Suggestions = Extension.create<unknown, SuggestionsStorage>({
   addStorage() {
     return {
       suggestions: new Map<string, SuggestionRecord>(),
-      lastCreatedId: null as string | null
+      lastCreatedId: null as string | null,
+      lastCreatedInsertedBlockId: null as string | null
     }
   },
 
@@ -178,7 +187,7 @@ export const Suggestions = Extension.create<unknown, SuggestionsStorage>({
         ({ blockId, content, description }) =>
         ({ editor, chain }) => {
           const found = getBlockById(editor, blockId)
-          if (!found) return false
+          if (!found?.node) return false
 
           const { node, pos } = found
           const from = pos
@@ -217,15 +226,10 @@ export const Suggestions = Extension.create<unknown, SuggestionsStorage>({
       stageSuggestionInsert:
         ({ afterBlockId, content, description }) =>
         ({ editor, chain }) => {
-          let insertPos: number
-          if (afterBlockId === '__start__') {
-            insertPos = 0
-          } else {
-            const found = getBlockById(editor, afterBlockId)
-            if (!found) return false
-            insertPos = found.pos + found.node.nodeSize
-          }
+          const anchor = resolveInsertAnchor(editor, afterBlockId)
+          if ('error' in anchor) return false
 
+          const insertPos = clampDocPosition(editor, anchor.insertPos)
           const beforeContent = { type: 'doc', content: [] }
           const id = generateSuggestionId()
 
@@ -244,11 +248,14 @@ export const Suggestions = Extension.create<unknown, SuggestionsStorage>({
             endPos = nodeAt ? insertPos + nodeAt.nodeSize : insertPos
           }
 
+          const insertedBlockId = getLastInsertedBlockId(editor, insertPos, endPos)
+
           editor.storage.suggestions.suggestions.set(id, {
             id,
             type: 'insert',
             description,
             blockId: afterBlockId,
+            insertedBlockId: insertedBlockId ?? undefined,
             beforeFrom: insertPos,
             beforeTo: insertPos,
             beforeContent,
@@ -256,6 +263,7 @@ export const Suggestions = Extension.create<unknown, SuggestionsStorage>({
             to: endPos
           })
           editor.storage.suggestions.lastCreatedId = id
+          editor.storage.suggestions.lastCreatedInsertedBlockId = insertedBlockId
 
           editor.view.dispatch(editor.state.tr.setMeta(suggestionsKey, { refresh: true }))
           return true
@@ -265,7 +273,7 @@ export const Suggestions = Extension.create<unknown, SuggestionsStorage>({
         ({ blockId, description }) =>
         ({ editor }) => {
           const found = getBlockById(editor, blockId)
-          if (!found) return false
+          if (!found?.node) return false
 
           const { node, pos } = found
           const from = pos

@@ -1,6 +1,11 @@
 import type { Editor } from '@tiptap/core'
 import { useAiStore } from '../store/aiStore'
-import { getBlockById, serializeRangeToHtml, serializeBlockToHtml } from './docService'
+import {
+  getBlockById,
+  resolveInsertAnchor,
+  serializeRangeToHtml,
+  serializeBlockToHtml
+} from './docService'
 
 function trackSuggestion(
   suggestionId: string,
@@ -21,6 +26,11 @@ function trackSuggestion(
 function latestSuggestionId(editor: Editor): string | null {
   const storage = editor.storage.suggestions as { lastCreatedId: string | null }
   return storage?.lastCreatedId ?? null
+}
+
+function latestInsertedBlockId(editor: Editor): string | null {
+  const storage = editor.storage.suggestions as { lastCreatedInsertedBlockId: string | null }
+  return storage?.lastCreatedInsertedBlockId ?? null
 }
 
 function findMessageIdForSuggestion(suggestionId: string): string | null {
@@ -84,11 +94,22 @@ export function stageInsert(
   afterBlockId: string,
   content: any,
   description: string
-): { success: boolean; suggestionId?: string; description?: string; error?: string } {
+): { success: boolean; suggestionId?: string; blockId?: string; description?: string; error?: string } {
+  const anchor = resolveInsertAnchor(editor, afterBlockId)
+  if ('error' in anchor) {
+    return { success: false, error: anchor.error }
+  }
+
   const ok = editor.commands.stageSuggestionInsert({ afterBlockId, content, description })
-  if (!ok) return { success: false, error: 'Failed to stage insert' }
+  if (!ok) {
+    return {
+      success: false,
+      error: 'Failed to stage insert (editor rejected content). Check block type and plain text only.'
+    }
+  }
 
   const suggestionId = latestSuggestionId(editor)
+  const blockId = latestInsertedBlockId(editor) ?? undefined
   if (suggestionId) {
     let newHtml = ''
     try {
@@ -99,9 +120,9 @@ export function stageInsert(
     } catch {
       newHtml = String(content)
     }
-    trackSuggestion(suggestionId, afterBlockId, description, '', newHtml)
+    trackSuggestion(suggestionId, blockId ?? afterBlockId, description, '', newHtml)
   }
-  return { success: true, suggestionId: suggestionId ?? undefined, description }
+  return { success: true, suggestionId: suggestionId ?? undefined, blockId, description }
 }
 
 export function stageDelete(
@@ -110,13 +131,21 @@ export function stageDelete(
   description: string
 ): { success: boolean; deleted: string[]; error?: string } {
   const deleted: string[] = []
+  const notFound: string[] = []
+
   for (const blockId of blockIds) {
     const found = getBlockById(editor, blockId)
-    if (!found) continue
+    if (!found) {
+      notFound.push(blockId)
+      continue
+    }
 
     const originalHtml = serializeBlockToHtml(editor, found.node, found.pos)
     const ok = editor.commands.stageSuggestionDelete({ blockId, description })
-    if (!ok) continue
+    if (!ok) {
+      notFound.push(blockId)
+      continue
+    }
 
     const suggestionId = latestSuggestionId(editor)
     if (suggestionId) {
@@ -124,7 +153,20 @@ export function stageDelete(
     }
     deleted.push(blockId)
   }
-  return { success: deleted.length > 0, deleted }
+
+  if (deleted.length === 0) {
+    const parts: string[] = []
+    if (notFound.length > 0) {
+      parts.push(`Not found or failed: ${notFound.join(', ')}`)
+    }
+    return {
+      success: false,
+      deleted: [],
+      error: `${parts.join('. ')}. Use get_document_outline to find valid blockIds.`
+    }
+  }
+
+  return { success: true, deleted }
 }
 
 export function stageFormatRange(

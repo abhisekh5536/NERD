@@ -712,6 +712,62 @@ export function getBlockById(editor: Editor, blockId: string): { node: PmNode; p
   return findBlockPos(editor, blockId)
 }
 
+/** Clamp a document position to valid range [0, doc.content.size]. */
+export function clampDocPosition(editor: Editor, pos: number): number {
+  const max = editor.state.doc.content.size
+  return Math.max(0, Math.min(Math.floor(pos), max))
+}
+
+/**
+ * Resolve afterBlockId to a document insert position.
+ * Supports __start__, blk_* block IDs, and sug_* suggestion IDs (backward compat).
+ */
+export function resolveInsertAnchor(
+  editor: Editor,
+  afterBlockId: string
+): { insertPos: number } | { error: string } {
+  if (afterBlockId === '__start__') {
+    return { insertPos: 0 }
+  }
+
+  const found = findBlockPos(editor, afterBlockId)
+  if (found) {
+    if (!found.node) {
+      return { error: `Block ${afterBlockId} has an invalid node reference.` }
+    }
+    return { insertPos: found.pos + found.node.nodeSize }
+  }
+
+  if (afterBlockId.startsWith('sug_')) {
+    const storage = editor.storage.suggestions as
+      | { suggestions?: Map<string, { to: number }> }
+      | undefined
+    const rec = storage?.suggestions?.get(afterBlockId)
+    if (rec) {
+      return { insertPos: rec.to }
+    }
+    return {
+      error: `Unknown afterBlockId "${afterBlockId}". Use blockId from the prior insert result, or call get_document_outline.`
+    }
+  }
+
+  return {
+    error: `Block ${afterBlockId} not found. Use get_document_outline or the blockId returned by a prior insert_block.`
+  }
+}
+
+/** Last top-level block with a blockId in the range [from, to). */
+export function getLastInsertedBlockId(editor: Editor, from: number, to: number): string | null {
+  let lastId: string | null = null
+  const doc = editor.state.doc
+  doc.nodesBetween(from, to, (node, _pos, parent) => {
+    if (parent === doc && node.attrs.blockId) {
+      lastId = node.attrs.blockId as string
+    }
+  })
+  return lastId
+}
+
 /** Find document positions for exact text within a block (handles inline marks). */
 export function findTextInBlock(
   editor: Editor,
