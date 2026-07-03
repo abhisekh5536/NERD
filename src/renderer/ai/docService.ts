@@ -580,7 +580,11 @@ function getCandidateBlockIds(
       if (!candidates) {
         candidates = new Set(hits)
       } else {
-        candidates = new Set(Array.from(candidates).filter((id) => hits.has(id)))
+        const next = new Set<string>()
+        for (const id of candidates) {
+          if (hits.has(id)) next.add(id)
+        }
+        candidates = next
       }
     }
     return candidates ?? new Set(index.blockOrder)
