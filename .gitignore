@@ -1,0 +1,12 @@
+node_modules
+dist
+out
+dist-electron
+*.log*
+.DS_Store
+.idea
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+.eslintcache
+.tmp

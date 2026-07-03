@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Phase 1 CSP: 'unsafe-inline' on script/style is required for the Vite dev
+      server (React Fast Refresh injects an inline module) and inline styles used
+      by TipTap/React. Phase 5 hardening replaces this with a nonce/header-based
+      policy enforced from the main process for production builds.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: http: https:"
+    />
+    <title>Document1 - WordClone</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>
