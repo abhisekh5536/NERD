@@ -22,7 +22,7 @@ export function registerAgentSessionHandlers(): void {
         provider,
         model: config.model ?? 'gemini-2.5-flash',
         temperature: config.temperature ?? 0.7,
-        thinkingEnabled: config.thinkingEnabled ?? true
+        thinkingEnabled: config.thinkingEnabled ?? false
       })
       return { sessionId }
     }

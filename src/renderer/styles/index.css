@@ -49,7 +49,7 @@ button {
 }
 
 /* ----------------------------------------------------------------------------
- * Document canvas + page surface (driven by tiptap-pagination-plus).
+ * Document canvas + page surface (eigenpal paginated OOXML editor).
  * The plugin renders a single column (.rm-with-pagination) sized to pageWidth
  * with gray gaps (.rm-pagination-gap) between pages. We paint the sheet white
  * and float it on the gray canvas.
@@ -707,5 +707,26 @@ button {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Native OOXML editor (eigenpal) */
+.wordclone-editor {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.wordclone-editor .docx-editor-root,
+.wordclone-editor [class*='DocxEditor'] {
+  height: 100%;
+}
+
+@media print {
+  .wordclone-editor,
+  .wordclone-editor * {
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
 }
 

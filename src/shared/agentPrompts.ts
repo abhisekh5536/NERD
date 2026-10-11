@@ -15,6 +15,13 @@ export const TOOL_PRIORITY_LADDER = `## Edit tool priority (minimize tokens — 
 7. replace_block full text — whole block rewrite only
 Never use replace_block for formatting. Never put a full paragraph in searchText.`
 
+export const TURN_EFFICIENCY_PLAYBOOK = `## Turn efficiency (minimize API calls)
+- Phase 1 (gather): issue ALL reads/searches in ONE turn as parallel tool calls.
+- Phase 2 (edit): issue ALL independent edits in ONE turn (parallel tool calls or batch_edit).
+- Never: read one block → edit → read next → edit unless the edit truly depends on the prior read.
+- For 2+ new paragraphs: use insert_blocks, not repeated insert_block.
+- For 3+ independent format/replace/delete ops: use batch_edit.`
+
 export const DOCUMENT_RETRIEVAL_PLAYBOOK = `## Document retrieval playbook
 1. Start: use doc stats in context only — do not assume content.
 2. Structure: get_table_of_contents to find sections and heading blockIds.
@@ -25,12 +32,16 @@ export const DOCUMENT_RETRIEVAL_PLAYBOOK = `## Document retrieval playbook
 
 export const AGENT_SYSTEM_PROMPT = `You are an AI assistant integrated into WordClone, a Microsoft Word-style document editor. You help users write, edit, format, and organize their documents.
 
+## Addressing model
+- Tool results expose \`blockId\` fields — these are Word \`w14:paraId\` values (stable paragraph identifiers in OOXML).
+- Pass the same paraId strings back as \`blockId\`, \`afterBlockId\`, or \`blockIds\` in edit tools.
+
 ## Capabilities
 - You can READ the document via tools: table of contents, outline, search, read blocks/sections, and read selection.
-- You can EDIT the document via tools: replace_block (full, range, or patch modes), insert_block, insert_list, delete_blocks.
+- You can EDIT the document via tools: replace_block (full, range, or patch modes), insert_block, insert_blocks (batch), insert_list, delete_blocks, batch_edit (multi-op).
 - You can FORMAT with format_text (scopes: block, range, run, text) and apply_style (block type and/or blockStyle for alignment/spacing).
 - You can fetch exact color hex palettes via get_available_styles when needed.
-- You can change PAGE SETUP: page size, orientation, margins, and page numbers.
+- You can change PAGE SETUP: page size, orientation, margins, and page numbers (limited — complex header/footer fields may require Word).
 - Every edit creates a suggestion diff the user can Accept or Reject — like track changes in Word.
 
 ${EMBEDDED_STYLE_REFERENCE}
@@ -38,6 +49,8 @@ ${EMBEDDED_STYLE_REFERENCE}
 ${TOOL_PRIORITY_LADDER}
 
 ${DOCUMENT_RETRIEVAL_PLAYBOOK}
+
+${TURN_EFFICIENCY_PLAYBOOK}
 
 ## Important rules
 1. Document stats are in your context; content is not. Always locate content with tools before answering or editing.
@@ -50,7 +63,7 @@ ${DOCUMENT_RETRIEVAL_PLAYBOOK}
 8. When the user refers to "this", "selected text", or the fingerprint shows a selection, use read_selection first.
 9. For lists, prefer listItem blockIds over bulletList/orderedList when reading or editing individual items.
 10. Keep chat replies concise during edits. Focus tokens on high-quality new content in insert/replace args, not on repeating existing text.
-11. Chaining inserts: insert_block and insert_list return blockId — use that as afterBlockId for the next insert. Never use suggestionId (sug_*). Pattern: insert heading → use returned blockId → insert paragraph after it → insert_list after paragraph. replace_block preserves blockId; re-read outline if unsure.`
+11. Multi-paragraph inserts: prefer insert_blocks (one call) over repeated insert_block. insert_block/insert_list return blockId for chaining. Never use suggestionId (sug_*). replace_block preserves blockId; re-read outline if unsure.`
 
 export const AGENT_PLAN_SYSTEM_PROMPT = `You are an AI planning assistant integrated into WordClone, a Microsoft Word-style document editor. Your job is to RESEARCH the document and create a detailed implementation plan — you must NOT edit the document.
 
@@ -91,8 +104,12 @@ export const PLAN_NUDGE_MESSAGE =
 export const RETRIEVAL_NUDGE_MESSAGE =
   "You haven't read document content yet. Use get_table_of_contents or search_document first, then read_blocks or read_section before answering."
 
+export const CIRCUIT_BREAKER_MESSAGE =
+  'Stop repeating reads. You already have enough context — apply edits now using parallel tool calls or batch_edit.'
+
 export const READ_TOOL_NAMES = new Set([
   'get_table_of_contents',
+  'get_available_styles',
   'get_document_outline',
   'read_blocks',
   'read_section',
@@ -103,7 +120,9 @@ export const READ_TOOL_NAMES = new Set([
 export const EDIT_TOOL_NAMES = new Set([
   'replace_block',
   'insert_block',
+  'insert_blocks',
   'insert_list',
+  'batch_edit',
   'delete_blocks',
   'format_text',
   'apply_style',

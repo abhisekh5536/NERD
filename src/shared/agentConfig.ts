@@ -3,8 +3,8 @@ export const DEFAULT_AGENT_CONFIG = {
   maxSteps: 200,
   maxDurationMs: 2 * 60 * 60 * 1000,
   maxStepsPerSegment: 50,
-  maxAgentNudges: 3,
-  maxPlanNudges: 5,
+  maxAgentNudges: 1,
+  maxPlanNudges: 2,
   /** Max silence between streamed chunks after the first token arrives. */
   stallTimeoutMs: 30_000,
   /** Max wait for the provider to emit the first token (slow cold-start models). */
@@ -12,7 +12,7 @@ export const DEFAULT_AGENT_CONFIG = {
   maxTurnRetries: 5,
   maxStallRetries: 1,
   toolCallTimeoutMs: 60_000,
-  historyMessageLimit: 40
+  historyMessageLimit: 12
 } as const
 
 export type AgentConfig = typeof DEFAULT_AGENT_CONFIG

@@ -1,5 +1,5 @@
-import type { Editor } from '@tiptap/core'
-import type { OutlineEntry } from './docService'
+import type { WordCloneEditorRef } from '../editor/editorBridge'
+import { getDocumentOutline, type OutlineEntry } from './docService'
 
 export interface IndexedBlock {
   blockId: string
@@ -20,16 +20,6 @@ export interface DocumentIndex {
   headingIndex: Map<string, Set<string>>
 }
 
-const LIST_CONTAINER_TYPES = new Set(['bulletList', 'orderedList'])
-const OUTLINE_BLOCK_TYPES = new Set([
-  'paragraph',
-  'heading',
-  'listItem',
-  'table',
-  'blockquote',
-  'codeBlock',
-  'image'
-])
 const TOKEN_MIN_LEN = 3
 
 function tokenize(text: string): string[] {
@@ -48,46 +38,39 @@ function addToIndex(index: Map<string, Set<string>>, token: string, blockId: str
   set.add(blockId)
 }
 
-function buildIndexFromEditor(editor: Editor): DocumentIndex {
+function buildIndexFromEditor(editor: WordCloneEditorRef): DocumentIndex {
   const blocks = new Map<string, IndexedBlock>()
   const blockOrder: string[] = []
   const headings: OutlineEntry[] = []
   const invertedIndex = new Map<string, Set<string>>()
   const headingIndex = new Map<string, Set<string>>()
 
-  editor.state.doc.descendants((node, pos) => {
-    if (!node.attrs.blockId) return true
-    if (LIST_CONTAINER_TYPES.has(node.type.name)) return true
-    if (!OUTLINE_BLOCK_TYPES.has(node.type.name)) return true
-
-    const blockId = node.attrs.blockId as string
-    const type = node.type.name
-    const text = node.textContent
-    const charLength = text.length
-    const level = type === 'heading' ? (node.attrs.level ?? 1) : undefined
-
-    blocks.set(blockId, { blockId, type, level, text, pos, charLength })
-    blockOrder.push(blockId)
-
-    if (type === 'heading') {
-      headings.push({ blockId, level: level!, text, type: 'heading' })
-      for (const token of tokenize(text)) {
-        addToIndex(headingIndex, token, blockId)
+  const outline = getDocumentOutline(editor)
+  outline.forEach((entry, index) => {
+    blocks.set(entry.blockId, {
+      blockId: entry.blockId,
+      type: entry.type,
+      level: entry.level,
+      text: entry.text,
+      pos: index,
+      charLength: entry.text.length
+    })
+    blockOrder.push(entry.blockId)
+    if (entry.type === 'heading') {
+      headings.push(entry)
+      for (const token of tokenize(entry.text)) {
+        addToIndex(headingIndex, token, entry.blockId)
       }
     }
-
-    for (const token of tokenize(text)) {
-      addToIndex(invertedIndex, token, blockId)
+    for (const token of tokenize(entry.text)) {
+      addToIndex(invertedIndex, token, entry.blockId)
     }
-
-    return true
   })
 
-  const doc = editor.state.doc
-  const docKey = `${doc.content.size}:${doc.textContent.length}`
+  const docKey = `${blockOrder.length}:${editor.getTotalPages()}`
 
   return {
-    version: 1,
+    version: 2,
     docKey,
     blocks,
     blockOrder,
@@ -100,9 +83,8 @@ function buildIndexFromEditor(editor: Editor): DocumentIndex {
 let cachedIndex: DocumentIndex | null = null
 let cachedDocKey: string | null = null
 
-export function getDocumentIndex(editor: Editor): DocumentIndex {
-  const doc = editor.state.doc
-  const docKey = `${doc.content.size}:${doc.textContent.length}`
+export function getDocumentIndex(editor: WordCloneEditorRef): DocumentIndex {
+  const docKey = `${editor.getTotalPages()}:${getDocumentOutline(editor).length}`
   if (cachedIndex && cachedDocKey === docKey) {
     return cachedIndex
   }

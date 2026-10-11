@@ -1,12 +1,12 @@
 import { useCallback } from 'react'
 import { X, Hammer, FileText } from 'lucide-react'
-import type { Editor } from '@tiptap/core'
+import type { WordCloneEditorRef } from '../../editor/editorBridge'
 import { useAiStore } from '../../store/aiStore'
 import { AgentController } from '../../ai/agent'
 import PlanTodosBar from './PlanTodosBar'
 
 interface Props {
-  editor: Editor | null
+  editor: WordCloneEditorRef | null
   onImplementPlan?: (planId: string) => void
 }
 

@@ -15,6 +15,7 @@ export interface OpenFileResult {
 export interface OpenDocumentResult {
   canceled: boolean
   filePath?: string
+  bytes?: ArrayBuffer
   content?: string
   contentType?: 'html' | 'text'
   format?: 'docx' | 'doc' | 'html' | 'txt'
@@ -24,8 +25,10 @@ export interface OpenDocumentResult {
 
 export interface SaveDocumentPayload {
   filePath?: string
-  content: string
   defaultFileName?: string
+  format?: 'docx' | 'doc' | 'html' | 'txt'
+  bytes?: ArrayBuffer | Uint8Array
+  content?: string
 }
 
 export interface SaveDocumentResult {

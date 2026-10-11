@@ -8,33 +8,29 @@ const emptySchema = { type: 'object', properties: {}, required: [] as string[] }
 export const READ_TOOLS = [
   {
     name: 'get_table_of_contents',
-    description:
-      'Headings-only table of contents with blockIds and levels. Use first to find sections. Do not use when you already have the target blockIds.',
+    description: 'Headings with blockIds and levels. Use first to find sections.',
     parametersJsonSchema: emptySchema
   },
   {
     name: 'get_available_styles',
-    description:
-      'Returns hex color palettes (theme shades, standard, highlight). Call only when you need an exact theme/shade hex value.',
+    description: 'Hex color palettes. Only when exact theme/shade hex is needed.',
     parametersJsonSchema: emptySchema
   },
   {
     name: 'get_document_outline',
-    description:
-      'Full outline with body previews (large). Prefer get_table_of_contents for navigation; use after major edits when you need body-block previews.',
+    description: 'Full outline with previews (large). Prefer get_table_of_contents for navigation.',
     parametersJsonSchema: emptySchema
   },
   {
     name: 'read_blocks',
-    description:
-      'Read up to 10 blocks by blockId. Returns text, runs, blockStyle, prevBlockId/nextBlockId. Use after search_document. Not for whole sections — use read_section instead.',
+    description: 'Read up to 10 blocks by blockId. Use after search_document.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
         blockIds: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Block IDs to read (max 10)'
+          description: 'Word w14:paraId values (exposed as blockId in tool results)'
         },
         textOffset: {
           type: 'number',
@@ -50,8 +46,7 @@ export const READ_TOOLS = [
   },
   {
     name: 'read_section',
-    description:
-      'Read contiguous blocks from startBlockId to endBlockId or next same-level heading. Use for chapters/sections. Max 25 blocks per call.',
+    description: 'Read contiguous blocks from startBlockId. Max 25 blocks.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -77,14 +72,12 @@ export const READ_TOOLS = [
   },
   {
     name: 'read_selection',
-    description:
-      'Read full selected text with runs and blockStyle. Use when fingerprint shows selection or user refers to "this"/selected text.',
+    description: 'Read selected text with runs. Use when fingerprint shows selection.',
     parametersJsonSchema: emptySchema
   },
   {
     name: 'search_document',
-    description:
-      'Keyword search returning snippets and blockIds. Use short keywords; pass queries[] for synonyms. Follow with read_blocks or read_section.',
+    description: 'Keyword search returning blockIds. Use queries[] for synonyms.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -121,7 +114,7 @@ export const EDIT_TOOLS = [
     parametersJsonSchema: {
       type: 'object',
       properties: {
-        blockId: { type: 'string', description: 'The blockId to edit' },
+        blockId: { type: 'string', description: 'Word w14:paraId of the paragraph to edit' },
         text: {
           type: 'string',
           description: 'Full replacement plain text (full mode only). DO NOT use HTML.'
@@ -153,22 +146,53 @@ export const EDIT_TOOLS = [
   {
     name: 'insert_block',
     description:
-      'Insert a new block (paragraph, heading, blockquote) after a given blockId. Returns blockId of the inserted block for chaining further inserts. Creates suggestion diffs. Do not pass a description — the app generates the suggestion label from your content.',
+      'Insert one block after afterBlockId. For 2+ paragraphs use insert_blocks instead. Returns blockId for chaining.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
         afterBlockId: {
           type: 'string',
           description:
-            'Insert after this blockId (blk_*). Use "__start__" for document start. Never use suggestionId (sug_*). Chain inserts using blockId from the prior insert_block result.'
+            'Insert after this blockId (Word w14:paraId). Use "__start__" for document start. Never use suggestionId (sug_*).'
         },
         type: {
           type: 'string',
-          description: 'Type of block to insert: "paragraph", "heading1", "heading2", "heading3", "blockquote"'
+          description: 'Type: paragraph, heading1, heading2, heading3, blockquote'
         },
-        text: { type: 'string', description: 'Plain text content to insert. DO NOT use HTML.' }
+        text: { type: 'string', description: 'Plain text. No HTML.' }
       },
       required: ['afterBlockId', 'type', 'text']
+    }
+  },
+  {
+    name: 'insert_blocks',
+    description:
+      'Batch insert up to 20 blocks in one call. Items chain sequentially (each after the prior insert). Prefer over repeated insert_block.',
+    parametersJsonSchema: {
+      type: 'object',
+      properties: {
+        blocks: {
+          type: 'array',
+          maxItems: 20,
+          items: {
+            type: 'object',
+            properties: {
+              afterBlockId: {
+                type: 'string',
+                description: 'Anchor for first block only; later blocks chain automatically.'
+              },
+              type: {
+                type: 'string',
+                description: 'paragraph, heading1, heading2, heading3, blockquote'
+              },
+              text: { type: 'string', description: 'Plain text. No HTML.' }
+            },
+            required: ['afterBlockId', 'type', 'text']
+          },
+          description: 'Ordered blocks to insert (max 20).'
+        }
+      },
+      required: ['blocks']
     }
   },
   {
@@ -181,7 +205,7 @@ export const EDIT_TOOLS = [
         afterBlockId: {
           type: 'string',
           description:
-            'Insert after this blockId (blk_*). Use "__start__" for document start. Never use suggestionId (sug_*). Use blockId from a prior insert_block result.'
+            'Insert after this blockId (Word w14:paraId, 8-char hex). Use "__start__" for document start. Never use suggestionId (sug_*). Use blockId from a prior insert_block result.'
         },
         listType: { type: 'string', description: '"bulletList" or "orderedList"' },
         items: {
@@ -191,6 +215,49 @@ export const EDIT_TOOLS = [
         }
       },
       required: ['afterBlockId', 'listType', 'items']
+    }
+  },
+  {
+    name: 'batch_edit',
+    description:
+      'Apply up to 15 ordered edit ops in one call. ops: replace_block, format_text, apply_style, delete_blocks. Use for multi-block edits after reads.',
+    parametersJsonSchema: {
+      type: 'object',
+      properties: {
+        edits: {
+          type: 'array',
+          maxItems: 15,
+          items: {
+            type: 'object',
+            properties: {
+              op: {
+                type: 'string',
+                enum: ['replace_block', 'format_text', 'apply_style', 'delete_blocks'],
+                description: 'Edit tool to run'
+              },
+              blockId: { type: 'string' },
+              blockIds: { type: 'array', items: { type: 'string' } },
+              afterBlockId: { type: 'string' },
+              text: { type: 'string' },
+              type: { type: 'string' },
+              startOffset: { type: 'number' },
+              endOffset: { type: 'number' },
+              newText: { type: 'string' },
+              oldText: { type: 'string' },
+              occurrence: { type: 'number' },
+              scope: { type: 'string' },
+              searchText: { type: 'string' },
+              runIndex: { type: 'number' },
+              formatting: { type: 'object' },
+              style: { type: 'string' },
+              blockStyle: { type: 'object' }
+            },
+            required: ['op']
+          },
+          description: 'Ordered edit operations (max 15).'
+        }
+      },
+      required: ['edits']
     }
   },
   {

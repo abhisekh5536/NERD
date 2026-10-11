@@ -23,7 +23,7 @@ const DEFAULT_CONFIG: AppConfig = {
   provider: 'gemini',
   model: 'gemini-2.5-flash',
   temperature: 0.7,
-  thinkingEnabled: true,
+  thinkingEnabled: false,
   customBaseUrl: DEFAULT_CUSTOM_BASE_URL,
   customSupportsThinking: false,
   customExtraBody: ''

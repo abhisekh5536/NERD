@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
-import type { Editor } from '@tiptap/core'
+import type { WordCloneEditorRef } from '../../editor/editorBridge'
 import { AgentSessionClient } from '../../ai/sessionClient'
 import { useAiStore } from '../../store/aiStore'
 import type { AgentSessionSnapshot } from '../../../shared/agentSession'
 
 interface Props {
-  editor: Editor | null
+  editor: WordCloneEditorRef | null
 }
 
 export default function SessionRecoveryBanner({ editor }: Props) {

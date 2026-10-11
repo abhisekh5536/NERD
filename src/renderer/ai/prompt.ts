@@ -1,4 +1,5 @@
-import type { Editor } from '@tiptap/core'
+import type { WordCloneEditorRef } from '../editor/editorBridge'
+import { getPageCount } from '../editor/editorBridge'
 import {
   AGENT_SYSTEM_PROMPT,
   AGENT_PLAN_SYSTEM_PROMPT
@@ -16,9 +17,8 @@ export function buildPlanSystemPrompt(): string {
   return AGENT_PLAN_SYSTEM_PROMPT
 }
 
-function getPageCount(editor: Editor): number {
-  const dom = editor.view.dom as HTMLElement
-  return Math.max(1, dom.querySelectorAll('.rm-page-break').length)
+function getPageCountForPrompt(editor: WordCloneEditorRef): number {
+  return getPageCount(editor)
 }
 
 export interface ContextMessageOptions {
@@ -27,12 +27,12 @@ export interface ContextMessageOptions {
 }
 
 export function buildContextMessages(
-  editor: Editor,
+  editor: WordCloneEditorRef,
   options: ContextMessageOptions = { full: true }
 ): { role: string; parts: { text: string }[] }[] {
   const outlineView = buildDocumentOutlineView(editor)
   const selection = readSelection(editor)
-  const pageCount = getPageCount(editor)
+  const pageCount = getPageCountForPrompt(editor)
   const full = options.full !== false
 
   let contextText = `## Current Document

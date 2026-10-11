@@ -8,7 +8,7 @@ import type {
   StreamTurnMeta
 } from '../../shared/agentSession'
 import { DEFAULT_AGENT_CONFIG } from '../../shared/agentConfig'
-import { EDIT_TOOL_NAMES, PLAN_NUDGE_MESSAGE, READ_TOOL_NAMES, RETRIEVAL_NUDGE_MESSAGE } from '../../shared/agentPrompts'
+import { EDIT_TOOL_NAMES, PLAN_NUDGE_MESSAGE, READ_TOOL_NAMES, RETRIEVAL_NUDGE_MESSAGE, CIRCUIT_BREAKER_MESSAGE } from '../../shared/agentPrompts'
 import { ALL_TOOLS, PLAN_TOOLS } from '../../shared/agentTools'
 import { decryptApiKey } from '../ipc/settings'
 import { streamGemini } from '../ipc/providers/gemini'
@@ -65,6 +65,11 @@ export interface ActiveLoop {
   submittedPlan: unknown | null
   documentBlockCount: number
   readToolsCalled: boolean
+  recentTurnToolKeys: string[][]
+  consecutiveReadOnlyTurns: number
+  circuitBreakerCount: number
+  totalToolCalls: number
+  nudgeReasons: string[]
   deps: LoopRunnerDeps
   currentRequestId: string | null
   currentStreamAbort: AbortController | null
@@ -103,6 +108,99 @@ function dedupeFunctionCalls(calls: StreamFunctionCall[]): StreamFunctionCall[] 
     out.push(fc)
   }
   return out
+}
+
+function stripThoughtPartsFromContents(contents: unknown[]): unknown[] {
+  return contents.map((msg) => {
+    if (typeof msg !== 'object' || msg === null) return msg
+    const m = msg as { role?: string; parts?: unknown[] }
+    if (!Array.isArray(m.parts)) return msg
+    return {
+      ...m,
+      parts: m.parts.filter(
+        (p) =>
+          !(
+            typeof p === 'object' &&
+            p !== null &&
+            (p as { thought?: boolean }).thought === true
+          )
+      )
+    }
+  })
+}
+
+function countToolKeyInRecentTurns(key: string, currentKeys: string[], recent: string[][]): number {
+  let count = currentKeys.filter((k) => k === key).length
+  for (const turn of recent) {
+    if (turn.includes(key)) count++
+  }
+  return count
+}
+
+function shouldTripCircuitBreaker(
+  loop: ActiveLoop,
+  dedupedCalls: StreamFunctionCall[]
+): boolean {
+  if (dedupedCalls.length === 0) return false
+
+  const callKeys = dedupedCalls.map(functionCallKey)
+  const allReadOnly = dedupedCalls.every((c) => READ_TOOL_NAMES.has(c.name))
+  const hasRepeat = callKeys.some(
+    (key) => countToolKeyInRecentTurns(key, callKeys, loop.recentTurnToolKeys) >= 2
+  )
+  const pingPong =
+    allReadOnly &&
+    loop.consecutiveReadOnlyTurns >= 4 &&
+    userAskedForEdits(loop.snapshot.userMessage) &&
+    loop.snapshot.stats.editToolCount === 0
+
+  return hasRepeat || pingPong
+}
+
+function recordToolTurn(
+  loop: ActiveLoop,
+  dedupedCalls: StreamFunctionCall[],
+  options?: { countTowardTotal?: boolean }
+): void {
+  const callKeys = dedupedCalls.map(functionCallKey)
+  loop.recentTurnToolKeys.push(callKeys)
+  if (loop.recentTurnToolKeys.length > 3) {
+    loop.recentTurnToolKeys.shift()
+  }
+  if (options?.countTowardTotal !== false) {
+    loop.totalToolCalls += dedupedCalls.length
+  }
+
+  const allReadOnly = dedupedCalls.every((c) => READ_TOOL_NAMES.has(c.name))
+  if (allReadOnly) {
+    loop.consecutiveReadOnlyTurns++
+  } else {
+    loop.consecutiveReadOnlyTurns = 0
+  }
+}
+
+function countSuccessfulEdits(tr: AgentToolResultPayload): number {
+  if (tr.status !== 'done') return 0
+  if (tr.name === 'batch_edit' || tr.name === 'insert_blocks') {
+    const result = tr.result as { count?: number }
+    return typeof result.count === 'number' && result.count > 0 ? result.count : 1
+  }
+  if (EDIT_TOOL_NAMES.has(tr.name)) return 1
+  return 0
+}
+
+function logSessionMetrics(loop: ActiveLoop): void {
+  const { stepCount, nudgeCount, editToolCount } = loop.snapshot.stats
+  const toolsPerTurn = stepCount > 0 ? loop.totalToolCalls / stepCount : 0
+  console.info('[agent] session metrics', {
+    sessionId: loop.sessionId,
+    stepCount,
+    nudgeCount,
+    editToolCount,
+    circuitBreakerCount: loop.circuitBreakerCount,
+    toolsPerTurn: Math.round(toolsPerTurn * 100) / 100,
+    nudgeReasons: loop.nudgeReasons
+  })
 }
 
 function updateStats(loop: ActiveLoop, statusLabel?: string): void {
@@ -222,7 +320,7 @@ async function streamTurn(loop: ActiveLoop, requestId: string): Promise<StreamTu
       requestId,
       provider: loop.snapshot.provider,
       model: loop.snapshot.model,
-      contents: loop.snapshot.contents,
+      contents: stripThoughtPartsFromContents(loop.snapshot.contents),
       tools,
       thinkingEnabled: loop.snapshot.thinkingEnabled,
       temperature: loop.snapshot.temperature
@@ -327,9 +425,14 @@ function evaluateContinuation(
 
   const text = result.text.trim()
   const planning =
-    /\bi will\b|\bi'll\b|\bnext i\b|\blet me\b|\bgoing to\b/i.test(text) && text.length > 0
+    loop.snapshot.stats.editToolCount === 0 &&
+    /\b(i will now|i'll now|i'll start\b|i'll start by|going to start|next i will)\b/i.test(text) &&
+    text.length > 0
 
-  if (planning || (loop.snapshot.stats.editToolCount === 0 && userAskedForEdits(loop.snapshot.userMessage))) {
+  const needsEditNudge =
+    loop.snapshot.stats.editToolCount === 0 && userAskedForEdits(loop.snapshot.userMessage)
+
+  if (planning || (needsEditNudge && text.length <= 200)) {
     if (loop.snapshot.stats.nudgeCount >= DEFAULT_AGENT_CONFIG.maxAgentNudges) {
       return { continue: false }
     }
@@ -350,7 +453,7 @@ function userAskedForEdits(intent: string): boolean {
   return (
     /\b(edit|rewrite|format|insert|delete|replace|fix|update|change|add|remove|implement)\b/.test(
       lower
-    ) || /\bplan\b/.test(lower)
+    ) || /\b(implement|execute|apply)\s+(the\s+)?plan\b/.test(lower)
   )
 }
 
@@ -504,6 +607,24 @@ export async function runAgentLoop(loop: ActiveLoop): Promise<void> {
         let planSubmittedThisTurn = false
         const dedupedCalls = dedupeFunctionCalls(result.functionCalls)
 
+        if (shouldTripCircuitBreaker(loop, dedupedCalls)) {
+          loop.circuitBreakerCount++
+          recordToolTurn(loop, dedupedCalls, { countTowardTotal: false })
+          loop.deps.emit(loop.webContents, {
+            type: 'continuation_injected',
+            sessionId: loop.sessionId,
+            reason: 'circuit_breaker',
+            message: CIRCUIT_BREAKER_MESSAGE,
+            at: Date.now()
+          })
+          loop.snapshot.contents = [
+            ...loop.snapshot.contents,
+            { role: 'model', parts: result.modelParts },
+            { role: 'user', parts: [{ text: CIRCUIT_BREAKER_MESSAGE }] }
+          ]
+          continue
+        }
+
         loop.deps.emit(loop.webContents, {
           type: 'tool_call',
           sessionId: loop.sessionId,
@@ -538,9 +659,12 @@ export async function runAgentLoop(loop: ActiveLoop): Promise<void> {
             planSubmittedThisTurn = true
           } else if (READ_TOOL_NAMES.has(tr.name) && tr.status === 'done') {
             loop.readToolsCalled = true
-          } else if (EDIT_TOOL_NAMES.has(tr.name) && tr.status === 'done') {
-            loop.snapshot.stats.editToolCount++
-            loop.documentEdited = true
+          } else {
+            const editCount = countSuccessfulEdits(tr)
+            if (editCount > 0) {
+              loop.snapshot.stats.editToolCount += editCount
+              loop.documentEdited = true
+            }
           }
 
           functionResponseParts.push({
@@ -551,6 +675,8 @@ export async function runAgentLoop(loop: ActiveLoop): Promise<void> {
             }
           })
         }
+
+        recordToolTurn(loop, dedupedCalls)
 
         loop.snapshot.contents = [
           ...loop.snapshot.contents,
@@ -579,6 +705,7 @@ export async function runAgentLoop(loop: ActiveLoop): Promise<void> {
           loop.snapshot.stats.nudgeCount < DEFAULT_AGENT_CONFIG.maxAgentNudges
         ) {
           loop.snapshot.stats.nudgeCount++
+          loop.nudgeReasons.push('no_read')
           loop.deps.emit(loop.webContents, {
             type: 'continuation_injected',
             sessionId: loop.sessionId,
@@ -596,6 +723,7 @@ export async function runAgentLoop(loop: ActiveLoop): Promise<void> {
 
         if (decision.continue && decision.message) {
           loop.snapshot.stats.nudgeCount++
+          loop.nudgeReasons.push(decision.reason ?? 'continue')
           loop.deps.emit(loop.webContents, {
             type: 'continuation_injected',
             sessionId: loop.sessionId,
@@ -634,6 +762,7 @@ export async function runAgentLoop(loop: ActiveLoop): Promise<void> {
       })
     } else {
       loop.snapshot.status = 'completed'
+      logSessionMetrics(loop)
       loop.deps.emit(loop.webContents, {
         type: 'session_completed',
         sessionId: loop.sessionId,

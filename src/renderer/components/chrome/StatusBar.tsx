@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import type { Editor } from '@tiptap/react'
+import type { WordCloneEditorRef } from '../../editor/editorBridge'
+import { getPlainText } from '../../editor/editorBridge'
 import { Minus, Plus } from 'lucide-react'
 import { useUiStore } from '../../store/uiStore'
 
@@ -8,24 +9,29 @@ interface DocStats {
   characters: number
 }
 
-function useDocStats(editor: Editor | null): DocStats {
+function useDocStats(editor: WordCloneEditorRef | null): DocStats {
   const [stats, setStats] = useState<DocStats>({ words: 0, characters: 0 })
 
   useEffect(() => {
     if (!editor) return
+    let raf = 0
     const update = (): void => {
-      const text = editor.getText()
-      const trimmed = text.trim()
-      setStats({
-        words: trimmed ? trimmed.split(/\s+/).length : 0,
-        characters: text.length
+      cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(() => {
+        try {
+          const text = getPlainText(editor)
+          const trimmed = text.trim()
+          setStats({
+            words: trimmed ? trimmed.split(/\s+/).length : 0,
+            characters: text.length
+          })
+        } catch {
+          /* ignore transient layout errors during bulk track-change ops */
+        }
       })
     }
     update()
-    editor.on('update', update)
-    return () => {
-      editor.off('update', update)
-    }
+    return editor.onContentChange(() => update())
   }, [editor])
 
   return stats
@@ -35,7 +41,7 @@ export default function StatusBar({
   editor,
   pageCount
 }: {
-  editor: Editor | null
+  editor: WordCloneEditorRef | null
   pageCount: number
 }) {
   const { words, characters } = useDocStats(editor)
@@ -44,13 +50,16 @@ export default function StatusBar({
   const zoomIn = useUiStore((s) => s.zoomIn)
   const zoomOut = useUiStore((s) => s.zoomOut)
   const resetZoom = useUiStore((s) => s.resetZoom)
+  const currentPage = editor?.getCurrentPage() ?? 1
 
   const zoomBtn = 'flex h-5 w-5 items-center justify-center rounded-full hover:bg-white/20'
 
   return (
     <div className="flex h-6 shrink-0 items-center justify-between bg-word-accent px-3 text-[12px] text-white">
       <div className="flex items-center gap-4">
-        <span>Page 1 of {pageCount}</span>
+        <span>
+          Page {currentPage} of {pageCount}
+        </span>
         <span>
           {words} {words === 1 ? 'word' : 'words'}
         </span>

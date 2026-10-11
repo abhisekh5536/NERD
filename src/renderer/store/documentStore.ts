@@ -1,7 +1,9 @@
 import { create } from 'zustand'
+import type { Document } from '@eigenpal/docx-editor-core/types/document'
 
 export type BackstageSection = 'new' | 'open' | 'save' | 'saveAs' | 'print' | 'recent'
 export type DocumentOperation = 'new' | 'open' | 'save' | 'saveAs' | 'print' | 'recent'
+export type DocumentFormat = 'docx' | 'doc' | 'html' | 'txt'
 
 interface DocumentState {
   filePath: string | null
@@ -14,6 +16,13 @@ interface DocumentState {
   busyOperation: DocumentOperation | null
   statusMessage: string | null
   errorMessage: string | null
+  /** Raw DOCX bytes for initial editor mount (null = empty document). */
+  documentBuffer: ArrayBuffer | null | undefined
+  /** Bumps when a full editor remount is required. */
+  documentKey: number
+  /** Parsed document for text/html imports (alternative to buffer). */
+  importDocument: Document | null
+  currentFormat: DocumentFormat
 
   openBackstage: (section?: BackstageSection) => void
   closeBackstage: () => void
@@ -22,6 +31,11 @@ interface DocumentState {
   markDirty: () => void
   markClean: (filePath?: string | null) => void
   resetToNewDocument: () => void
+  setDocumentPayload: (payload: {
+    documentBuffer?: ArrayBuffer | null | undefined
+    importDocument?: Document | null
+    format?: DocumentFormat
+  }) => void
 
   setRecentFiles: (paths: string[]) => void
   addRecentFile: (path: string) => void
@@ -52,6 +66,10 @@ export const useDocumentStore = create<DocumentState>((set) => ({
   busyOperation: null,
   statusMessage: null,
   errorMessage: null,
+  documentBuffer: null,
+  documentKey: 0,
+  importDocument: null,
+  currentFormat: 'docx',
 
   openBackstage: (section) =>
     set((state) => ({
@@ -74,12 +92,23 @@ export const useDocumentStore = create<DocumentState>((set) => ({
       }
     }),
   resetToNewDocument: () =>
-    set({
+    set((state) => ({
       filePath: null,
       displayName: DEFAULT_DOCUMENT_NAME,
       isDirty: false,
-      lastSavedAt: null
-    }),
+      lastSavedAt: null,
+      documentBuffer: null,
+      importDocument: null,
+      currentFormat: 'docx',
+      documentKey: state.documentKey + 1
+    })),
+  setDocumentPayload: (payload) =>
+    set((state) => ({
+      documentBuffer: payload.documentBuffer ?? null,
+      importDocument: payload.importDocument ?? null,
+      currentFormat: payload.format ?? 'docx',
+      documentKey: state.documentKey + 1
+    })),
 
   setRecentFiles: (recentFiles) =>
     set({

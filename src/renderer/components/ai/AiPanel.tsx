@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { Settings, X, Sparkles, Trash2, Check, XCircle } from 'lucide-react'
-import type { Editor } from '@tiptap/core'
+import type { WordCloneEditorRef } from '../../editor/editorBridge'
 import { useAiStore } from '../../store/aiStore'
 import { AgentController } from '../../ai/agent'
 import {
@@ -16,13 +16,14 @@ import ToolTimeline from './ToolTimeline'
 import SettingsModal from './SettingsModal'
 import CopyRawButton from './CopyRawButton'
 import AgentRunStatusBar from './AgentRunStatusBar'
+import ApiCallCounterBadge from './ApiCallCounterBadge'
 import SessionRecoveryBanner from './SessionRecoveryBanner'
 import PlanTodosBar from './PlanTodosBar'
 import { getModelLabel, getProviderInfo } from '../../../shared/models'
 import { AgentSessionClient } from '../../ai/sessionClient'
 
 interface Props {
-  editor: Editor | null
+  editor: WordCloneEditorRef | null
   agentRef?: React.MutableRefObject<AgentController | null>
 }
 
@@ -176,6 +177,8 @@ export default function AiPanel({ editor, agentRef: externalAgentRef }: Props) {
           className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize"
           onMouseDown={handleResizeStart}
         />
+
+        <ApiCallCounterBadge />
 
         <div className="flex items-center justify-between border-b border-ribbon-border bg-chrome px-3 py-2">
           <div className="flex items-center gap-1.5">

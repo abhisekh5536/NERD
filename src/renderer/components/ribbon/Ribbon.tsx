@@ -1,9 +1,11 @@
-import type { Editor } from '@tiptap/react'
+import type { WordCloneEditorRef, RibbonFormatState } from '../../editor/editorBridge'
 import { useUiStore, type RibbonTabId } from '../../store/uiStore'
 import { useDocumentStore } from '../../store/documentStore'
 import HomeTab from './HomeTab'
+import InsertTab from './tabs/InsertTab'
+import LayoutTab from './tabs/LayoutTab'
+import ReviewTab from './tabs/ReviewTab'
 import ViewTab from './tabs/ViewTab'
-import PlaceholderTab, { PLACEHOLDER_TABS } from './tabs/PlaceholderTab'
 import AiToggleButton from '../ai/AiToggleButton'
 
 const TABS: { id: RibbonTabId; label: string }[] = [
@@ -15,11 +17,12 @@ const TABS: { id: RibbonTabId; label: string }[] = [
 ]
 
 interface RibbonProps {
-  editor: Editor | null
+  editor: WordCloneEditorRef | null
+  formatState: RibbonFormatState | null
   onFileClick: () => void
 }
 
-export default function Ribbon({ editor, onFileClick }: RibbonProps) {
+export default function Ribbon({ editor, formatState, onFileClick }: RibbonProps) {
   const activeTab = useUiStore((s) => s.activeTab)
   const setActiveTab = useUiStore((s) => s.setActiveTab)
   const backstageOpen = useDocumentStore((s) => s.backstageOpen)
@@ -59,11 +62,11 @@ export default function Ribbon({ editor, onFileClick }: RibbonProps) {
       </div>
 
       <div className="h-[98px] overflow-visible border-t border-ribbon-border bg-ribbon px-2 py-1">
-        {activeTab === 'home' && <HomeTab editor={editor} />}
+        {activeTab === 'home' && <HomeTab editor={editor} formatState={formatState} />}
+        {activeTab === 'insert' && <InsertTab editor={editor} />}
+        {activeTab === 'layout' && <LayoutTab editor={editor} />}
+        {activeTab === 'review' && <ReviewTab editor={editor} />}
         {activeTab === 'view' && <ViewTab />}
-        {(activeTab === 'insert' || activeTab === 'layout' || activeTab === 'review') && (
-          <PlaceholderTab groups={PLACEHOLDER_TABS[activeTab]} />
-        )}
       </div>
     </div>
   )

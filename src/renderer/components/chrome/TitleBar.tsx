@@ -1,65 +1,38 @@
-import { useEffect, useState } from 'react'
-import type { Editor } from '@tiptap/react'
-import { Copy, Minus, Square, X } from 'lucide-react'
-import QuickAccessToolbar from './QuickAccessToolbar'
-import { useDocumentStore, getDocumentTitle } from '../../store/documentStore'
+import type { RefObject } from 'react'
+import type { WordCloneEditorRef } from '../../editor/editorBridge'
+import { getDocumentTitle, useDocumentStore } from '../../store/documentStore'
+import { Minus, Square, X } from 'lucide-react'
 
 interface TitleBarProps {
-  editor: Editor | null
-  onSave: (editor: Editor | null) => Promise<boolean>
+  editorRef: RefObject<WordCloneEditorRef | null>
+  onSave: (editorRef: RefObject<WordCloneEditorRef | null>) => Promise<boolean>
   onCloseRequest: () => void
 }
 
-export default function TitleBar({ editor, onSave, onCloseRequest }: TitleBarProps) {
-  const [maximized, setMaximized] = useState(false)
+export default function TitleBar({ editorRef, onSave, onCloseRequest }: TitleBarProps) {
   const displayName = useDocumentStore((s) => s.displayName)
   const isDirty = useDocumentStore((s) => s.isDirty)
-  const titleText = getDocumentTitle({ displayName, isDirty })
-
-  useEffect(() => {
-    window.api?.window
-      ?.isMaximized()
-      .then(setMaximized)
-      .catch(() => undefined)
-    const unsubscribe = window.api?.window?.onMaximizedChange(setMaximized)
-    return () => unsubscribe?.()
-  }, [])
-
-  const control =
-    'app-no-drag flex h-8 w-12 items-center justify-center text-white/90 transition-colors hover:bg-white/20'
+  const title = getDocumentTitle({ displayName, isDirty })
 
   return (
-    <div className="app-drag relative flex h-8 items-center justify-between bg-word-accent pl-2 text-white">
-      <QuickAccessToolbar editor={editor} onSave={onSave} />
-
-      <div className="pointer-events-none absolute left-1/2 -translate-x-1/2 text-[12px] text-white/95">
-        {titleText}
-      </div>
-
-      <div className="flex items-stretch">
+    <div className="app-drag flex h-8 shrink-0 items-center justify-between bg-word-accent pl-3 pr-0 text-white">
+      <span className="truncate text-[12px]">{title}</span>
+      <div className="app-no-drag flex h-full">
         <button
           type="button"
-          className={control}
-          title="Minimize"
-          onClick={() => window.api?.window?.minimize()}
+          className="px-3 text-[12px] hover:bg-white/10"
+          onClick={() => void onSave(editorRef)}
         >
-          <Minus size={16} />
+          Save
         </button>
-        <button
-          type="button"
-          className={control}
-          title={maximized ? 'Restore' : 'Maximize'}
-          onClick={() => window.api?.window?.toggleMaximize()}
-        >
-          {maximized ? <Copy size={13} /> : <Square size={13} />}
+        <button type="button" className="flex w-11 items-center justify-center hover:bg-white/10" onClick={() => window.api.window.minimize()}>
+          <Minus size={14} />
         </button>
-        <button
-          type="button"
-          className={`${control} hover:bg-red-600`}
-          title="Close"
-          onClick={onCloseRequest}
-        >
-          <X size={17} />
+        <button type="button" className="flex w-11 items-center justify-center hover:bg-white/10" onClick={() => window.api.window.toggleMaximize()}>
+          <Square size={12} />
+        </button>
+        <button type="button" className="flex w-11 items-center justify-center hover:bg-red-600" onClick={onCloseRequest}>
+          <X size={14} />
         </button>
       </div>
     </div>

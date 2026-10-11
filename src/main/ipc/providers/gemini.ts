@@ -8,6 +8,8 @@ export async function streamGemini(
   payload: AiStreamPayload
 ): Promise<ProviderStreamResult> {
   const ai = new GoogleGenAI({ apiKey })
+  // Stable contents[0..1] (system prompt + ack) enable Gemini 2.5+ implicit context caching
+  // on repeated agent turns within a session.
   const config: Record<string, unknown> = {
     temperature: payload.temperature,
     abortSignal: ctx.abortSignal

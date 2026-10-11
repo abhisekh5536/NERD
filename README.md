@@ -35,10 +35,10 @@ WordClone is already beyond an early scaffold. Today it includes:
 
 ### Important current limitations
 
-- File persistence is **not complete** yet (`file:save` returns `persisted: false` for now).
-- `.docx` import/export is not implemented yet.
 - Ribbon parity is partial (Home and View are wired; Insert/Layout/Review commands are mostly placeholders).
+- `.doc` import requires LibreOffice headless (`soffice` / `libreoffice`) for conversion to DOCX bytes.
 - Online web search tools are **not implemented yet** (current search is document-only).
+- Full Word layout fidelity depends on `@eigenpal/docx-editor` capabilities; complex legacy `.docx` features may still differ from Microsoft Word.
 
 ## Tech Stack
 
@@ -47,11 +47,12 @@ WordClone is already beyond an early scaffold. Today it includes:
 | Desktop shell | Electron `42.4` (frameless window, secure renderer) |
 | Build tooling | `electron-vite 5`, `Vite 7`, `electron-builder 26` |
 | UI | React `19`, TypeScript `6`, Tailwind CSS `4` |
-| Editor engine | TipTap `2` (ProseMirror) |
-| Pagination | `tiptap-pagination-plus` |
+| Editor engine | `@eigenpal/docx-editor-react` (native OOXML / Word fidelity) |
+| Document model | `@eigenpal/docx-editor-core` |
+| AI document tools | `@eigenpal/docx-editor-agents` (paraId + track changes) |
 | State | Zustand |
 | AI SDK | `@google/genai` (Gemini models) |
-| Diffing | `fast-diff` + custom Suggestions extension |
+| Diffing | eigenpal track changes + `fast-diff` for AI suggestion UI |
 | Packaging | NSIS (Windows), DMG (macOS), AppImage (Linux) |
 
 ## Architecture
@@ -79,7 +80,7 @@ flowchart LR
   subgraph rendererProc [Renderer - React]
     App[App Shell]
     Ribbon[Ribbon + Tabs]
-    Editor["WordEditor (TipTap + PaginationPlus)"]
+    Editor["DocxWordEditor (eigenpal OOXML)"]
     Agent["AgentController + Tools"]
     Diff["Suggestion Diff Workflow"]
     Panel["AI Copilot Panel"]
@@ -103,9 +104,9 @@ flowchart LR
 
 ### 1) Word-style editor core
 
-- TipTap editor with rich-text extensions (bold, italic, underline, strike, colors, font family/size, alignment, lists, headings, blockquote).
-- Table and image extensions are loaded.
-- Real paginated page canvas using Letter defaults (`8.5in x 11in`) and 1-inch margins.
+- Native OOXML editing via `@eigenpal/docx-editor-react` with Word-like pagination and layout.
+- Rich-text formatting through eigenpal APIs (bold, italic, underline, strike, colors, font family/size, alignment, styles).
+- `.docx` files open and save as raw binary (no HTML round-trip); `.html`/`.txt` import creates a new document from text.
 - Zoom, ruler, and live status bar metrics (pages, words, characters).
 
 ### 2) Agentic AI Copilot (already live)
@@ -141,10 +142,9 @@ The agent can propose:
 
 ### 5) Human-in-the-loop diff workflow
 
-- Every AI edit is staged as a suggestion.
-- Suggestions are visually decorated in the editor.
-- User can accept/reject each change, or accept/reject all.
-- This keeps agentic power with explicit editorial control.
+- Every AI edit is staged as a tracked change via `proposeChange()`.
+- Suggestions appear in the AI panel with accept/reject controls.
+- Accept/reject resolves tracked changes in the OOXML document via ProseMirror revision commands.
 
 ## Feature Status Matrix
 
@@ -154,16 +154,17 @@ The agent can propose:
 | Home ribbon editing controls | Implemented | Rich text formatting and styles |
 | View tab (ruler, zoom) | Implemented | Working UI and state wiring |
 | Insert/Layout/Review tabs | Partial | Mostly placeholder buttons in current build |
-| Paginated editor canvas | Implemented | Visual page breaks over single ProseMirror doc |
+| Paginated editor canvas | Implemented | eigenpal paginated OOXML layout |
+| `.docx` open/save | Implemented | Raw ArrayBuffer IPC; no mammoth/html-to-docx |
+| `.doc` import | Partial | Requires LibreOffice headless conversion |
 | AI chat panel + streaming | Implemented | Gemini streaming via main process IPC |
 | Agent document exploration tools | Implemented | Outline, block read, selection read, in-doc search |
 | Agent edit tools | Implemented | Replace/insert/delete/format/style/table/image/page ops |
 | Suggestion diff review flow | Implemented | Accept/reject individual or all |
 | Page setup control by agent | Partial | Tool exists; full Layout ribbon UX still pending |
 | Page numbering control by agent | Partial | Tool exists; full header/footer UI pending |
-| Save/Open file dialogs | Partial | Dialog flow exists, persistence not complete |
-| Actual file write/read | Not started | Save currently returns `persisted: false` |
-| `.docx` import/export | Not started | Planned phase |
+| Save/Open file dialogs | Implemented | DOCX bytes written directly to disk |
+| Actual file write/read | Implemented | DOCX, HTML, and TXT formats |
 | Online web search tools | Not started | Planned Cursor-like research mode |
 | Multi-document context awareness | Not started | Current context is active document only |
 | Autosave + recovery | Not started | Planned |
@@ -203,7 +204,7 @@ The agent can propose:
 To become a true production-grade Cursor + Word experience, the next gaps are:
 
 - **Persistence**: complete real read/write, autosave, crash recovery, recent files.
-- **Document interoperability**: robust `.docx` import/export fidelity.
+- **Document interoperability**: expand DOCX fidelity test corpus; validate complex Word layouts side-by-side.
 - **Word parity**: full Insert/Layout/Review tabs with functional commands.
 - **Cursor parity**: online search tools, source citation, richer context retrieval.
 - **Scalability**: virtualization/perf work for very large documents.
@@ -216,10 +217,10 @@ To become a true production-grade Cursor + Word experience, the next gaps are:
 - Finalize file persistence contract (`open`, `save`, Save As, dirty-state handling).
 - Add robust error surfaces and user feedback for file and AI failures.
 
-### Phase B - Real document I/O
+### Phase B - Document I/O fidelity
 
-- Implement `.docx` import and export.
-- Add compatibility test corpus for common Word layouts.
+- Expand `.docx` round-trip test corpus (`tests/fixtures/docx/`, `pnpm test:docx-roundtrip`).
+- Side-by-side Word comparison harness for layout regression (see `docs/DOCX_FIDELITY.md`).
 
 ### Phase C - Full layout and review parity
 
@@ -262,7 +263,9 @@ pnpm dev
 | `pnpm build:linux` | Build Linux package |
 | `pnpm typecheck` | Typecheck node and web tsconfigs |
 | `pnpm lint` | Run ESLint |
-| `pnpm format` | Run Prettier write |
+| `pnpm test:smoke` | Run file-format smoke tests |
+| `pnpm test:docx-roundtrip` | Validate DOCX fixture OOXML structure |
+| `pnpm test:fixtures:generate` | Regenerate DOCX test fixtures |
 
 ## Security and Privacy Notes
 

@@ -155,6 +155,11 @@ export class AgentSessionManager {
       submittedPlan: null,
       documentBlockCount: payload.documentBlockCount ?? 0,
       readToolsCalled: false,
+      recentTurnToolKeys: [],
+      consecutiveReadOnlyTurns: 0,
+      circuitBreakerCount: 0,
+      totalToolCalls: 0,
+      nudgeReasons: [],
       deps: {
         requestContext: (sid, full) => this.requestContext(sid, full),
         executeTools: (sid, calls) => this.executeTools(sid, calls),

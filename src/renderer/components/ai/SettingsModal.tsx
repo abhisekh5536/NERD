@@ -35,7 +35,7 @@ export default function SettingsModal({ open, onClose }: Props) {
   const [provider, setProvider] = useState<AiProvider>('gemini')
   const [model, setModel] = useState('gemini-2.5-flash')
   const [temperature, setTemperature] = useState(0.7)
-  const [thinkingEnabled, setThinkingEnabled] = useState(true)
+  const [thinkingEnabled, setThinkingEnabled] = useState(false)
   const [customBaseUrl, setCustomBaseUrl] = useState(DEFAULT_CUSTOM_BASE_URL)
   const [customSupportsThinking, setCustomSupportsThinking] = useState(false)
   const [customExtraBody, setCustomExtraBody] = useState('')

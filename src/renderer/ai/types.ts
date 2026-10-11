@@ -91,6 +91,7 @@ export interface PendingSuggestion {
   description: string
   originalHtml: string
   newHtml: string
+  revisionId?: number
 }
 
 export type SuggestionStatus = 'pending' | 'accepted' | 'rejected'

@@ -1,4 +1,4 @@
-import type { Editor } from '@tiptap/core'
+import type { WordCloneEditorRef } from '../editor/editorBridge'
 import {
   useAiStore,
   nextMsgId,
@@ -8,7 +8,7 @@ import {
 import { buildSystemPrompt, buildPlanSystemPrompt, buildContextMessages } from './prompt'
 import { buildDocumentOutlineView } from './docService'
 import { executeToolCall } from './toolDispatcher'
-import { capToolResult, toolResultToResponse } from './agentUtils'
+import { capToolResult, compressReadToolResult, toolResultToResponse } from './agentUtils'
 import type { AiChunk } from '../../preload/index'
 import type {
   AgentSessionEvent,
@@ -16,11 +16,13 @@ import type {
   AgentToolCallPayload,
   AgentToolResultPayload
 } from '../../shared/agentSession'
+import { DEFAULT_AGENT_CONFIG } from '../../shared/agentConfig'
+import { READ_TOOL_NAMES } from '../../shared/agentPrompts'
 import type { AgentMode, ImplementationPlan, PlanTodo, ToolCallEvent } from './types'
 
 let sessionClientInitialized = false
 let activeSessionId: string | null = null
-let activeEditor: Editor | null = null
+let activeWordCloneEditorRef: WordCloneEditorRef | null = null
 let pendingCancel = false
 let ipcUnsubscribers: Array<() => void> = []
 
@@ -122,7 +124,7 @@ function buildPlanFromSubmitArgs(args: Record<string, unknown>): ImplementationP
 }
 
 function buildInitialContents(
-  editor: Editor,
+  editor: WordCloneEditorRef,
   userMessage: string,
   mode: AgentMode,
   skipUserMessage: boolean
@@ -132,7 +134,7 @@ function buildInitialContents(
 
   const history = store.messages
     .filter((m) => m.role === 'user' || m.role === 'assistant')
-    .slice(-40)
+    .slice(-DEFAULT_AGENT_CONFIG.historyMessageLimit)
     .map((m) => {
       if (m.role === 'user') {
         return { role: 'user' as const, parts: [{ text: m.content }] }
@@ -317,10 +319,10 @@ function teardownIpcHandlers(): void {
   sessionClientInitialized = false
 }
 
-function ensureIpcHandlers(editor: Editor): void {
+function ensureIpcHandlers(editor: WordCloneEditorRef): void {
   if (sessionClientInitialized) return
   sessionClientInitialized = true
-  activeEditor = editor
+  activeWordCloneEditorRef = editor
 
   ipcUnsubscribers.push(
     window.api.agent.onRequestContext(async (payload) => {
@@ -329,7 +331,7 @@ function ensureIpcHandlers(editor: Editor): void {
       return
     }
 
-    const ed = activeEditor
+    const ed = activeWordCloneEditorRef
     if (!ed) {
       await window.api.agent.provideContext(payload.sessionId, [])
       return
@@ -355,34 +357,53 @@ function ensureIpcHandlers(editor: Editor): void {
       return
     }
 
-    const ed = activeEditor
-    const results: AgentToolResultPayload[] = []
-    for (const call of payload.calls) {
+    const ed = activeWordCloneEditorRef
+
+    async function runOne(call: AgentToolCallPayload): Promise<AgentToolResultPayload> {
       try {
         if (!ed) throw new Error('Editor unavailable')
         const toolResult = executeToolCall(ed, call.name, call.args)
-        const capped = capToolResult(toolResult)
+        const compressed = compressReadToolResult(call.name, toolResult)
+        const capped = capToolResult(compressed)
         const response = toolResultToResponse(capped)
         const hasError =
           typeof response === 'object' && response !== null && 'error' in response
-        results.push({
+        return {
           name: call.name,
           id: call.id,
           args: call.args,
           result: response,
           status: hasError ? 'error' : 'done'
-        })
+        }
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : 'Tool execution failed'
-        results.push({
+        return {
           name: call.name,
           id: call.id,
           args: call.args,
           result: { error: errMsg },
           status: 'error'
-        })
+        }
       }
     }
+
+    const readCalls = payload.calls.filter((c) => READ_TOOL_NAMES.has(c.name))
+    const otherCalls = payload.calls.filter((c) => !READ_TOOL_NAMES.has(c.name))
+
+    const readResults = await Promise.all(readCalls.map((call) => runOne(call)))
+    const otherResults: AgentToolResultPayload[] = []
+    for (const call of otherCalls) {
+      otherResults.push(await runOne(call))
+    }
+
+    const byKey = new Map<string, AgentToolResultPayload>()
+    for (const r of [...readResults, ...otherResults]) {
+      byKey.set(r.id ?? `${r.name}:${JSON.stringify(r.args)}`, r)
+    }
+
+    const results = payload.calls.map(
+      (call) => byKey.get(call.id ?? `${call.name}:${JSON.stringify(call.args)}`)!
+    )
     await window.api.agent.provideToolResults(payload.sessionId, results)
     })
   )
@@ -396,20 +417,20 @@ function ensureIpcHandlers(editor: Editor): void {
 
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
-    const ed = activeEditor
+    const ed = activeWordCloneEditorRef
     teardownIpcHandlers()
     if (ed) ensureIpcHandlers(ed)
   })
 }
 
 export class AgentSessionClient {
-  private editor: Editor
+  private editor: WordCloneEditorRef
   private sessionId: string | null = null
   private cancelRequested = false
 
-  constructor(editor: Editor) {
+  constructor(editor: WordCloneEditorRef) {
     this.editor = editor
-    activeEditor = editor
+    activeWordCloneEditorRef = editor
     ensureIpcHandlers(editor)
   }
 
@@ -523,7 +544,7 @@ ${currentPlan.markdown}${todosText ? `\n\n## Todos\n${todosText}` : ''}`
     return window.api.agent.listResumable()
   }
 
-  static async resume(sessionId: string, editor: Editor): Promise<void> {
+  static async resume(sessionId: string, editor: WordCloneEditorRef): Promise<void> {
     const client = new AgentSessionClient(editor)
     const sessions = await window.api.agent.listResumable()
     const snap = sessions.find((s) => s.sessionId === sessionId)

@@ -1,36 +1,48 @@
-import type { Editor } from '@tiptap/core'
+import type { WordCloneEditorRef } from '../editor/editorBridge'
+import { findParagraphSnapshot } from '../editor/editorBridge'
+import { blockTypeToStyleId, insertParagraphAfter } from '../editor/paragraphInsert'
 import { useAiStore } from '../store/aiStore'
+import { findParagraphText, getLatestRevisionId } from './docServiceHelpers'
 import {
-  getBlockById,
-  resolveInsertAnchor,
-  serializeRangeToHtml,
-  serializeBlockToHtml
-} from './docService'
+  acceptAllChanges,
+  acceptChangeById,
+  rejectAllChanges,
+  rejectChangeById
+} from '@eigenpal/docx-editor-core/prosemirror/commands'
+
+const AI_AUTHOR = 'WordClone AI'
+
+function runTrackedChangeCommand(
+  editor: WordCloneEditorRef,
+  command: ReturnType<typeof acceptChangeById>
+): void {
+  const paged = editor.getEditorRef()
+  const view = paged?.getView()
+  if (!view) return
+  command(view.state, view.dispatch)
+  try {
+    paged?.relayout()
+  } catch {
+    /* layout will catch up on the next edit */
+  }
+}
 
 function trackSuggestion(
   suggestionId: string,
   blockId: string,
   description: string,
   originalHtml: string,
-  newHtml: string
+  newHtml: string,
+  revisionId?: number
 ): void {
   useAiStore.getState().addSuggestion({
     id: suggestionId,
     blockId,
     description,
     originalHtml,
-    newHtml
+    newHtml,
+    revisionId
   })
-}
-
-function latestSuggestionId(editor: Editor): string | null {
-  const storage = editor.storage.suggestions as { lastCreatedId: string | null }
-  return storage?.lastCreatedId ?? null
-}
-
-function latestInsertedBlockId(editor: Editor): string | null {
-  const storage = editor.storage.suggestions as { lastCreatedInsertedBlockId: string | null }
-  return storage?.lastCreatedInsertedBlockId ?? null
 }
 
 function findMessageIdForSuggestion(suggestionId: string): string | null {
@@ -60,73 +72,73 @@ function setSuggestionStatusEverywhere(suggestionId: string, status: 'accepted' 
   }
 }
 
+function newSuggestionId(): string {
+  return `sug_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+}
+
 export function stageReplace(
-  editor: Editor,
+  editor: WordCloneEditorRef,
   blockId: string,
-  content: any,
+  content: unknown,
   description: string
 ): { success: boolean; suggestionId?: string; description?: string; error?: string } {
-  const found = getBlockById(editor, blockId)
-  if (!found) return { success: false, error: `Block ${blockId} not found` }
+  const originalText = findParagraphText(editor, blockId)
+  if (originalText == null) return { success: false, error: `Block ${blockId} not found` }
 
-  const originalHtml = serializeBlockToHtml(editor, found.node, found.pos)
-  const ok = editor.commands.stageSuggestionReplace({ blockId, content, description })
+  const newText = typeof content === 'string' ? content : String(content ?? '')
+  const ok = editor.proposeChange({
+    paraId: blockId,
+    search: originalText,
+    replaceWith: newText,
+    author: AI_AUTHOR
+  })
   if (!ok) return { success: false, error: 'Failed to stage replacement' }
 
-  const suggestionId = latestSuggestionId(editor)
-  if (suggestionId) {
-    let newHtml = ''
-    try {
-      const rec = editor.storage.suggestions.suggestions.get(suggestionId)
-      if (rec) {
-        newHtml = serializeRangeToHtml(editor, rec.from, rec.to)
-      }
-    } catch {
-      newHtml = String(content)
-    }
-    trackSuggestion(suggestionId, blockId, description, originalHtml, newHtml)
-  }
-  return { success: true, suggestionId: suggestionId ?? undefined, description }
+  const suggestionId = newSuggestionId()
+  const revisionId = getLatestRevisionId(editor)
+  trackSuggestion(suggestionId, blockId, description, originalText, newText, revisionId)
+  return { success: true, suggestionId, description }
 }
 
 export function stageInsert(
-  editor: Editor,
+  editor: WordCloneEditorRef,
   afterBlockId: string,
-  content: any,
-  description: string
+  content: unknown,
+  description: string,
+  opts?: { blockType?: string }
 ): { success: boolean; suggestionId?: string; blockId?: string; description?: string; error?: string } {
-  const anchor = resolveInsertAnchor(editor, afterBlockId)
-  if ('error' in anchor) {
-    return { success: false, error: anchor.error }
+  if (afterBlockId !== '__start__' && !findParagraphSnapshot(editor, afterBlockId)) {
+    return { success: false, error: 'Insert anchor not found.' }
   }
 
-  const ok = editor.commands.stageSuggestionInsert({ afterBlockId, content, description })
-  if (!ok) {
-    return {
-      success: false,
-      error: 'Failed to stage insert (editor rejected content). Check block type and plain text only.'
-    }
+  const newText = typeof content === 'string' ? content : String(content ?? '')
+  const styleId = blockTypeToStyleId(opts?.blockType)
+  const result = insertParagraphAfter(editor, {
+    afterBlockId,
+    text: newText,
+    styleId,
+    blockType: opts?.blockType,
+    author: AI_AUTHOR
+  })
+
+  if (!result.success || !result.newParaId) {
+    return { success: false, error: result.error ?? 'Failed to stage insert.' }
   }
 
-  const suggestionId = latestSuggestionId(editor)
-  const blockId = latestInsertedBlockId(editor) ?? undefined
-  if (suggestionId) {
-    let newHtml = ''
-    try {
-      const rec = editor.storage.suggestions.suggestions.get(suggestionId)
-      if (rec) {
-        newHtml = serializeRangeToHtml(editor, rec.from, rec.to)
-      }
-    } catch {
-      newHtml = String(content)
-    }
-    trackSuggestion(suggestionId, blockId ?? afterBlockId, description, '', newHtml)
-  }
-  return { success: true, suggestionId: suggestionId ?? undefined, blockId, description }
+  const suggestionId = newSuggestionId()
+  trackSuggestion(
+    suggestionId,
+    result.newParaId,
+    description,
+    '',
+    newText,
+    result.revisionId
+  )
+  return { success: true, suggestionId, blockId: result.newParaId, description }
 }
 
 export function stageDelete(
-  editor: Editor,
+  editor: WordCloneEditorRef,
   blockIds: string[],
   description: string
 ): { success: boolean; deleted: string[]; error?: string } {
@@ -134,108 +146,105 @@ export function stageDelete(
   const notFound: string[] = []
 
   for (const blockId of blockIds) {
-    const found = getBlockById(editor, blockId)
-    if (!found) {
+    const text = findParagraphText(editor, blockId)
+    if (text == null) {
       notFound.push(blockId)
       continue
     }
-
-    const originalHtml = serializeBlockToHtml(editor, found.node, found.pos)
-    const ok = editor.commands.stageSuggestionDelete({ blockId, description })
+    const ok = editor.proposeChange({
+      paraId: blockId,
+      search: text,
+      replaceWith: '',
+      author: AI_AUTHOR
+    })
     if (!ok) {
       notFound.push(blockId)
       continue
     }
-
-    const suggestionId = latestSuggestionId(editor)
-    if (suggestionId) {
-      trackSuggestion(suggestionId, blockId, description, originalHtml, '')
-    }
+    const suggestionId = newSuggestionId()
+    const revisionId = getLatestRevisionId(editor)
+    trackSuggestion(suggestionId, blockId, description, text, '', revisionId)
     deleted.push(blockId)
   }
 
   if (deleted.length === 0) {
-    const parts: string[] = []
-    if (notFound.length > 0) {
-      parts.push(`Not found or failed: ${notFound.join(', ')}`)
-    }
     return {
       success: false,
       deleted: [],
-      error: `${parts.join('. ')}. Use get_document_outline to find valid blockIds.`
+      error: `Not found or failed: ${notFound.join(', ')}`
     }
   }
-
   return { success: true, deleted }
 }
 
 export function stageFormatRange(
-  editor: Editor,
+  editor: WordCloneEditorRef,
   blockId: string,
   from: number,
   to: number,
   description: string,
   opts?: { beforeContent?: unknown; type?: 'format' | 'style' }
 ): { success: boolean; suggestionId?: string } {
-  editor.commands.stageSuggestionRange({
-    blockId,
-    from,
-    to,
-    description,
-    type: opts?.type ?? 'format',
-    beforeContent: opts?.beforeContent
-  })
-  const suggestionId = latestSuggestionId(editor)
-  if (suggestionId) {
-    const found = getBlockById(editor, blockId)
-    const originalHtml = found ? serializeBlockToHtml(editor, found.node, found.pos) : ''
-    trackSuggestion(suggestionId, blockId, description, originalHtml, originalHtml)
-  }
-  return { success: true, suggestionId: suggestionId ?? undefined }
+  void opts
+  const text = findParagraphText(editor, blockId)
+  if (text == null) return { success: false }
+  const search = text.slice(from, to)
+  editor.applyFormatting({ paraId: blockId, search, marks: { bold: true } })
+  const suggestionId = newSuggestionId()
+  trackSuggestion(suggestionId, blockId, description, text, text)
+  return { success: true, suggestionId }
 }
 
 export function stageReplaceRange(
-  editor: Editor,
+  editor: WordCloneEditorRef,
   blockId: string,
   from: number,
   to: number,
   newText: string,
   description: string
 ): { success: boolean; suggestionId?: string; error?: string } {
-  const ok = editor.commands.stageSuggestionReplaceRange({
-    blockId,
-    from,
-    to,
-    newText,
-    description
+  const text = findParagraphText(editor, blockId)
+  if (text == null) return { success: false, error: `Block ${blockId} not found` }
+  const search = text.slice(from, to)
+  const ok = editor.proposeChange({
+    paraId: blockId,
+    search,
+    replaceWith: newText,
+    author: AI_AUTHOR
   })
   if (!ok) return { success: false, error: 'Failed to stage partial replace' }
-
-  const suggestionId = latestSuggestionId(editor)
-  if (suggestionId) {
-    const found = getBlockById(editor, blockId)
-    const originalHtml = found ? serializeBlockToHtml(editor, found.node, found.pos) : ''
-    trackSuggestion(suggestionId, blockId, description, originalHtml, originalHtml)
-  }
-  return { success: true, suggestionId: suggestionId ?? undefined }
+  const suggestionId = newSuggestionId()
+  const revisionId = getLatestRevisionId(editor)
+  trackSuggestion(suggestionId, blockId, description, search, newText, revisionId)
+  return { success: true, suggestionId }
 }
 
-export function acceptSuggestion(editor: Editor, id: string): void {
-  editor.commands.acceptSuggestion(id)
+export function acceptSuggestion(editor: WordCloneEditorRef, id: string): void {
+  const suggestion = useAiStore.getState().pendingSuggestions.find((s) => s.id === id)
+  if (suggestion?.revisionId != null) {
+    runTrackedChangeCommand(editor, acceptChangeById(suggestion.revisionId))
+  } else {
+    runTrackedChangeCommand(editor, acceptAllChanges())
+  }
   setSuggestionStatusEverywhere(id, 'accepted')
 }
 
-export function rejectSuggestion(editor: Editor, id: string): void {
-  editor.commands.rejectSuggestion(id)
+export function rejectSuggestion(editor: WordCloneEditorRef, id: string): void {
+  const suggestion = useAiStore.getState().pendingSuggestions.find((s) => s.id === id)
+  if (suggestion?.revisionId != null) {
+    runTrackedChangeCommand(editor, rejectChangeById(suggestion.revisionId))
+  } else {
+    runTrackedChangeCommand(editor, rejectAllChanges())
+  }
   setSuggestionStatusEverywhere(id, 'rejected')
 }
 
-export function acceptAllSuggestions(editor: Editor): void {
-  editor.commands.acceptAllSuggestions()
+export function acceptAllSuggestions(editor: WordCloneEditorRef): void {
+  runTrackedChangeCommand(editor, acceptAllChanges())
   useAiStore.getState().markAllSuggestionsStatus('accepted')
 }
 
-export function rejectAllSuggestions(editor: Editor): void {
-  editor.commands.rejectAllSuggestions()
+export function rejectAllSuggestions(editor: WordCloneEditorRef): void {
+  runTrackedChangeCommand(editor, rejectAllChanges())
   useAiStore.getState().markAllSuggestionsStatus('rejected')
 }

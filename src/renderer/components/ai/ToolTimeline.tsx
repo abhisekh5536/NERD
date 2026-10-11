@@ -12,6 +12,7 @@ const TOOL_LABELS: Record<string, string> = {
   replace_block: 'Editing block',
   insert_block: 'Inserting content',
   insert_blocks: 'Inserting content',
+  batch_edit: 'Applying edits',
   insert_list: 'Inserting list',
   insert_table: 'Inserting table',
   insert_image: 'Inserting image',

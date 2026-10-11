@@ -3,11 +3,7 @@ import { spawn } from 'child_process'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
 import { copyFile, mkdir, readdir, readFile, unlink, writeFile } from 'fs/promises'
 import { basename, extname, join } from 'path'
-import mammoth from 'mammoth'
-import HTMLToDOCX from 'html-to-docx'
-import { detectFormat, htmlToText, textToHtml, wrapHtmlDocument, type DocumentFormat } from './fileFormats'
-
-type ContentType = 'html' | 'text'
+import { detectFormat, type DocumentFormat } from './fileFormats'
 
 export interface OpenDocumentPayload {
   filePath?: string
@@ -16,8 +12,9 @@ export interface OpenDocumentPayload {
 export interface OpenDocumentResult {
   canceled: boolean
   filePath?: string
+  bytes?: ArrayBuffer
   content?: string
-  contentType?: ContentType
+  contentType?: 'html' | 'text'
   format?: DocumentFormat
   warnings?: string[]
   error?: string
@@ -25,8 +22,10 @@ export interface OpenDocumentResult {
 
 export interface SaveDocumentPayload {
   filePath?: string
-  content: string
   defaultFileName?: string
+  format?: DocumentFormat
+  bytes?: ArrayBuffer | Uint8Array
+  content?: string
 }
 
 export interface SaveDocumentResult {
@@ -51,6 +50,8 @@ export interface OpenFileResult {
 export interface SaveFilePayload {
   filePath?: string
   content: string
+  bytes?: ArrayBuffer | Uint8Array
+  format?: DocumentFormat
 }
 
 export interface SaveFileResult {
@@ -114,27 +115,15 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
   return fallback
 }
 
-async function blobLikeToBuffer(
-  value: Buffer | { arrayBuffer: () => Promise<ArrayBuffer> }
-): Promise<Buffer> {
-  if (Buffer.isBuffer(value)) return value
-  const arrayBuffer = await value.arrayBuffer()
-  return Buffer.from(arrayBuffer)
+function bufferToArrayBuffer(buffer: Buffer): ArrayBuffer {
+  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer
 }
 
-async function importDocx(filePath: string): Promise<{ content: string; warnings: string[] }> {
-  const buffer = await readFile(filePath)
-  const result = await mammoth.convertToHtml(
-    { buffer },
-    {
-      convertImage: mammoth.images.imgElement(async (image) => {
-        const base64 = await image.read('base64')
-        return { src: `data:${image.contentType};base64,${base64}` }
-      })
-    }
-  )
-  const warnings = result.messages.map((message) => `${message.type}: ${message.message}`)
-  return { content: result.value || '<p></p>', warnings }
+function toNodeBuffer(bytes: ArrayBuffer | Uint8Array): Buffer {
+  if (bytes instanceof Uint8Array) {
+    return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  }
+  return Buffer.from(bytes)
 }
 
 async function runCommand(command: string, args: string[]): Promise<void> {
@@ -196,57 +185,65 @@ async function convertLegacyDocToDocx(filePath: string): Promise<string> {
   const fallbackMessage = 'Install LibreOffice to open legacy .doc files, then try again.'
   const normalizedMessage = normalizeErrorMessage(lastError, fallbackMessage)
   const errorMessage = /ENOENT/i.test(normalizedMessage) ? fallbackMessage : normalizedMessage
-  throw new Error(
-    errorMessage
-  )
+  throw new Error(errorMessage)
 }
 
-async function importLegacyDoc(filePath: string): Promise<{ content: string; warnings: string[] }> {
+async function readBinaryDocx(filePath: string): Promise<{ bytes: ArrayBuffer; warnings: string[] }> {
+  const buffer = await readFile(filePath)
+  return { bytes: bufferToArrayBuffer(buffer), warnings: [] }
+}
+
+async function readLegacyDoc(filePath: string): Promise<{ bytes: ArrayBuffer; warnings: string[] }> {
   const convertedDocxPath = await convertLegacyDocToDocx(filePath)
-  const result = await importDocx(convertedDocxPath)
+  const result = await readBinaryDocx(convertedDocxPath)
   await unlink(convertedDocxPath).catch(() => undefined)
   return {
-    content: result.content,
-    warnings: ['Converted legacy .doc format to .docx during import.', ...result.warnings]
+    bytes: result.bytes,
+    warnings: ['Converted legacy .doc format to .docx during import.']
   }
 }
 
 async function readDocument(
   filePath: string
-): Promise<{ content: string; contentType: ContentType; format: DocumentFormat; warnings: string[] }> {
+): Promise<
+  | { kind: 'binary'; bytes: ArrayBuffer; format: DocumentFormat; warnings: string[] }
+  | { kind: 'text'; content: string; contentType: 'html' | 'text'; format: DocumentFormat; warnings: string[] }
+> {
   const format = detectFormat(filePath)
 
   if (format === 'docx') {
-    const result = await importDocx(filePath)
-    return { content: result.content, contentType: 'html', format, warnings: result.warnings }
+    const result = await readBinaryDocx(filePath)
+    return { kind: 'binary', bytes: result.bytes, format, warnings: result.warnings }
   }
 
   if (format === 'doc') {
-    const result = await importLegacyDoc(filePath)
-    return { content: result.content, contentType: 'html', format, warnings: result.warnings }
+    const result = await readLegacyDoc(filePath)
+    return { kind: 'binary', bytes: result.bytes, format, warnings: result.warnings }
   }
 
   const raw = await readFile(filePath, 'utf-8')
   if (format === 'html') {
-    return { content: raw, contentType: 'html', format, warnings: [] }
+    return { kind: 'text', content: raw, contentType: 'html', format, warnings: [] }
   }
-  return { content: textToHtml(raw), contentType: 'html', format, warnings: [] }
+  return { kind: 'text', content: raw, contentType: 'text', format, warnings: [] }
 }
 
-async function persistDocument(filePath: string, content: string): Promise<DocumentFormat> {
+async function persistDocument(filePath: string, payload: SaveDocumentPayload): Promise<DocumentFormat> {
   const format = detectFormat(filePath)
 
   if (format === 'docx') {
-    const docxLikeBuffer = await HTMLToDOCX(wrapHtmlDocument(content))
-    const docxBuffer = await blobLikeToBuffer(
-      docxLikeBuffer as Buffer | { arrayBuffer: () => Promise<ArrayBuffer> }
-    )
-    await writeFile(filePath, docxBuffer)
+    if (!payload.bytes) {
+      throw new Error('Document bytes are required to save a .docx file.')
+    }
+    await writeFile(filePath, toNodeBuffer(payload.bytes))
     return format
   }
 
   if (format === 'html') {
-    await writeFile(filePath, content, 'utf-8')
+    if (typeof payload.content !== 'string') {
+      throw new Error('HTML content is required to save a web page.')
+    }
+    await writeFile(filePath, payload.content, 'utf-8')
     return format
   }
 
@@ -254,7 +251,8 @@ async function persistDocument(filePath: string, content: string): Promise<Docum
     throw new Error('Saving to legacy .doc is not supported. Use .docx instead.')
   }
 
-  await writeFile(filePath, htmlToText(content), 'utf-8')
+  const text = typeof payload.content === 'string' ? payload.content : ''
+  await writeFile(filePath, text, 'utf-8')
   return 'txt'
 }
 
@@ -306,6 +304,15 @@ async function openDocumentHandler(
   try {
     const result = await readDocument(targetPath)
     updateRecentFile(targetPath)
+    if (result.kind === 'binary') {
+      return {
+        canceled: false,
+        filePath: targetPath,
+        bytes: result.bytes,
+        format: result.format,
+        warnings: result.warnings
+      }
+    }
     return {
       canceled: false,
       filePath: targetPath,
@@ -334,7 +341,7 @@ async function saveDocumentHandler(
   }
 
   try {
-    const format = await persistDocument(targetPath, payload.content)
+    const format = await persistDocument(targetPath, payload)
     updateRecentFile(targetPath)
     return { canceled: false, persisted: true, filePath: targetPath, format }
   } catch (error) {
@@ -395,7 +402,6 @@ export function registerFileHandlers(): void {
   ipcMain.handle('file:get-recent-files', (): string[] => getExistingRecentFiles())
   ipcMain.handle('file:clear-recent-files', (): void => writeRecentFiles([]))
 
-  // Legacy channels for existing callers. They proxy to the richer handlers.
   ipcMain.handle('file:open', async (event): Promise<OpenFileResult> => {
     const result = await openDocumentHandler(event)
     return { canceled: result.canceled, filePath: result.filePath }

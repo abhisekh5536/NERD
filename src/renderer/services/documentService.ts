@@ -1,54 +1,9 @@
-import type { Editor } from '@tiptap/core'
+import type { RefObject } from 'react'
+import { createDocumentWithText, createEmptyDocument } from '@eigenpal/docx-editor-react'
+import type { WordCloneEditorRef } from '../editor/editorBridge'
+import { getPlainText, saveEditorBuffer } from '../editor/editorBridge'
 import { useAiStore } from '../store/aiStore'
 import { useDocumentStore } from '../store/documentStore'
-
-type ContentType = 'html' | 'text'
-
-interface OpenDocumentResult {
-  canceled: boolean
-  filePath?: string
-  content?: string
-  contentType?: ContentType
-  warnings?: string[]
-  error?: string
-}
-
-interface SaveDocumentResult {
-  canceled: boolean
-  filePath?: string
-  persisted: boolean
-  error?: string
-}
-
-interface PrintDocumentResult {
-  success: boolean
-  canceled?: boolean
-  error?: string
-}
-
-export const BLANK_DOCUMENT_HTML = '<p></p>'
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;')
-}
-
-function plainTextToHtml(value: string): string {
-  const lines = value.split(/\r?\n/)
-  return lines.map((line) => `<p>${escapeHtml(line) || '<br />'}</p>`).join('')
-}
-
-function applyEditorContent(editor: Editor, content: string, contentType: ContentType = 'html'): void {
-  if (contentType === 'text') {
-    editor.commands.setContent(plainTextToHtml(content), false)
-    return
-  }
-  editor.commands.setContent(content || BLANK_DOCUMENT_HTML, false)
-}
 
 function clearAiDraftState(): void {
   const aiStore = useAiStore.getState()
@@ -60,15 +15,44 @@ function clearAiDraftState(): void {
 function askDiscardChanges(actionLabel: string): boolean {
   const { isDirty } = useDocumentStore.getState()
   if (!isDirty) return true
-  return window.confirm(
-    `You have unsaved changes. Do you want to continue and ${actionLabel}?`
-  )
+  return window.confirm(`You have unsaved changes. Do you want to continue and ${actionLabel}?`)
 }
 
 function buildSaveDefaultName(): string {
   const { displayName } = useDocumentStore.getState()
   const hasKnownExtension = /\.[a-z0-9]+$/i.test(displayName)
   return hasKnownExtension ? displayName : `${displayName}.docx`
+}
+
+function plainTextFromImport(content: string, contentType: 'html' | 'text'): string {
+  if (contentType === 'text') return content
+  const div = document.createElement('div')
+  div.innerHTML = content
+  return div.textContent ?? ''
+}
+
+async function loadIntoEditor(
+  editorRef: RefObject<WordCloneEditorRef | null>,
+  payload: {
+    bytes?: ArrayBuffer
+    importDocument?: ReturnType<typeof createEmptyDocument>
+    format: 'docx' | 'doc' | 'html' | 'txt'
+  }
+): Promise<void> {
+  const editor = editorRef.current
+  if (editor && payload.bytes) {
+    await editor.loadDocumentBuffer(payload.bytes)
+    return
+  }
+  if (editor && payload.importDocument) {
+    editor.loadDocument(payload.importDocument)
+    return
+  }
+  useDocumentStore.getState().setDocumentPayload({
+    documentBuffer: payload.bytes ?? null,
+    importDocument: payload.importDocument ?? null,
+    format: payload.format
+  })
 }
 
 export async function loadRecentFiles(): Promise<void> {
@@ -80,8 +64,9 @@ export async function loadRecentFiles(): Promise<void> {
   }
 }
 
-export async function createNewDocument(editor: Editor | null): Promise<boolean> {
-  if (!editor) return false
+export async function createNewDocument(
+  editorRef: RefObject<WordCloneEditorRef | null>
+): Promise<boolean> {
   const store = useDocumentStore.getState()
   store.beginOperation('new')
 
@@ -90,23 +75,27 @@ export async function createNewDocument(editor: Editor | null): Promise<boolean>
     return false
   }
 
-  applyEditorContent(editor, BLANK_DOCUMENT_HTML, 'html')
   clearAiDraftState()
   store.resetToNewDocument()
+  const editor = editorRef.current
+  if (editor) {
+    editor.loadDocument(createEmptyDocument())
+  }
   store.closeBackstage()
   store.finishOperation('Created a new blank document.')
   return true
 }
 
-export async function openDocument(editor: Editor | null): Promise<boolean> {
-  return openDocumentAtPath(editor)
+export async function openDocument(
+  editorRef: RefObject<WordCloneEditorRef | null>
+): Promise<boolean> {
+  return openDocumentAtPath(editorRef)
 }
 
 export async function openDocumentAtPath(
-  editor: Editor | null,
+  editorRef: RefObject<WordCloneEditorRef | null>,
   filePath?: string
 ): Promise<boolean> {
-  if (!editor) return false
   const store = useDocumentStore.getState()
   store.beginOperation('open')
 
@@ -115,7 +104,7 @@ export async function openDocumentAtPath(
     return false
   }
 
-  let result: OpenDocumentResult
+  let result: Awaited<ReturnType<typeof window.api.file.openDocument>>
   try {
     result = await window.api.file.openDocument(filePath)
   } catch (error) {
@@ -129,36 +118,65 @@ export async function openDocumentAtPath(
     return false
   }
 
-  if (!result.filePath || typeof result.content !== 'string') {
+  if (!result.filePath) {
     store.failOperation(result.error ?? 'The selected document could not be loaded.')
     return false
   }
 
-  applyEditorContent(editor, result.content, result.contentType ?? 'html')
+  try {
+    if (result.bytes) {
+      await loadIntoEditor(editorRef, {
+        bytes: result.bytes,
+        format: result.format ?? 'docx'
+      })
+    } else if (typeof result.content === 'string') {
+      const plain = plainTextFromImport(result.content, result.contentType ?? 'text')
+      const importDocument = createDocumentWithText(plain)
+      await loadIntoEditor(editorRef, {
+        importDocument,
+        format: result.format ?? 'txt'
+      })
+    } else {
+      store.failOperation(result.error ?? 'The selected document could not be loaded.')
+      return false
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to load the document into the editor.'
+    store.failOperation(message)
+    return false
+  }
+
   clearAiDraftState()
   store.markClean(result.filePath)
   store.addRecentFile(result.filePath)
   store.closeBackstage()
   const displayName = useDocumentStore.getState().displayName
-
   const warningText =
     result.warnings && result.warnings.length > 0 ? ` (${result.warnings.length} warnings)` : ''
   store.finishOperation(`Opened ${displayName}${warningText}.`)
   return true
 }
 
-export async function saveDocument(editor: Editor | null): Promise<boolean> {
-  if (!editor) return false
+export async function saveDocument(
+  editorRef: RefObject<WordCloneEditorRef | null>
+): Promise<boolean> {
   const store = useDocumentStore.getState()
   store.beginOperation('save')
 
+  const format = store.currentFormat
+  const bytes = format === 'docx' ? await saveEditorBuffer(editorRef.current) : undefined
+  const content =
+    format !== 'docx' ? getPlainText(editorRef.current) : undefined
+
   const payload = {
     filePath: store.filePath ?? undefined,
-    content: editor.getHTML(),
-    defaultFileName: buildSaveDefaultName()
+    defaultFileName: buildSaveDefaultName(),
+    format,
+    bytes: bytes ?? undefined,
+    content
   }
 
-  let result: SaveDocumentResult
+  let result: Awaited<ReturnType<typeof window.api.file.saveDocument>>
   try {
     result = await window.api.file.saveDocument(payload)
   } catch (error) {
@@ -180,23 +198,29 @@ export async function saveDocument(editor: Editor | null): Promise<boolean> {
   store.markClean(result.filePath)
   store.addRecentFile(result.filePath)
   store.closeBackstage()
-  const displayName = useDocumentStore.getState().displayName
-  store.finishOperation(`Saved ${displayName}.`)
+  store.finishOperation(`Saved ${useDocumentStore.getState().displayName}.`)
   return true
 }
 
-export async function saveDocumentAs(editor: Editor | null): Promise<boolean> {
-  if (!editor) return false
+export async function saveDocumentAs(
+  editorRef: RefObject<WordCloneEditorRef | null>
+): Promise<boolean> {
   const store = useDocumentStore.getState()
   store.beginOperation('saveAs')
 
+  const format = store.currentFormat
+  const bytes = format === 'docx' ? await saveEditorBuffer(editorRef.current) : undefined
+  const content = format !== 'docx' ? getPlainText(editorRef.current) : undefined
+
   const payload = {
     filePath: store.filePath ?? undefined,
-    content: editor.getHTML(),
-    defaultFileName: buildSaveDefaultName()
+    defaultFileName: buildSaveDefaultName(),
+    format,
+    bytes: bytes ?? undefined,
+    content
   }
 
-  let result: SaveDocumentResult
+  let result: Awaited<ReturnType<typeof window.api.file.saveDocumentAs>>
   try {
     result = await window.api.file.saveDocumentAs(payload)
   } catch (error) {
@@ -218,16 +242,31 @@ export async function saveDocumentAs(editor: Editor | null): Promise<boolean> {
   store.markClean(result.filePath)
   store.addRecentFile(result.filePath)
   store.closeBackstage()
-  const displayName = useDocumentStore.getState().displayName
-  store.finishOperation(`Saved a copy as ${displayName}.`)
+  store.finishOperation(`Saved a copy as ${useDocumentStore.getState().displayName}.`)
   return true
 }
 
-export async function printDocument(): Promise<boolean> {
+export async function printDocument(
+  editorRef: RefObject<WordCloneEditorRef | null>
+): Promise<boolean> {
   const store = useDocumentStore.getState()
   store.beginOperation('print')
 
-  let result: PrintDocumentResult
+  const editor = editorRef.current
+  if (editor) {
+    try {
+      editor.print()
+      store.closeBackstage()
+      store.finishOperation('Print dialog opened.')
+      return true
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to open the print dialog.'
+      store.failOperation(message)
+      return false
+    }
+  }
+
+  let result: Awaited<ReturnType<typeof window.api.file.printDocument>>
   try {
     result = await window.api.file.printDocument()
   } catch (error) {

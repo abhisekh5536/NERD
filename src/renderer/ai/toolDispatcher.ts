@@ -1,4 +1,5 @@
-import type { Editor } from '@tiptap/core'
+import type { WordCloneEditorRef } from '../editor/editorBridge'
+import { collectParagraphSnapshots } from '../editor/editorBridge'
 import {
   buildDocumentOutlineView,
   readBlocks,
@@ -14,8 +15,8 @@ import {
   getBlockCharLength
 } from './docService'
 import { stageReplace, stageInsert, stageDelete, stageFormatRange, stageReplaceRange } from './suggestionService'
+import { findParagraphText } from './docServiceHelpers'
 import { deriveSuggestionDescription } from './editDescription'
-import { resolvePageSize, inchToPx } from '../lib/units'
 import {
   FONT_FAMILIES,
   FONT_SIZES,
@@ -25,8 +26,41 @@ import {
   HIGHLIGHT_COLORS
 } from '../lib/editorStyles'
 
+function styleIdFromName(style: string): string {
+  switch (style) {
+    case 'heading1':
+      return 'Heading1'
+    case 'heading2':
+      return 'Heading2'
+    case 'heading3':
+      return 'Heading3'
+    default:
+      return 'Normal'
+  }
+}
+
+function buildMarks(formatting: Record<string, unknown>): Record<string, unknown> {
+  const marks: Record<string, unknown> = {}
+  if (formatting.bold) marks.bold = true
+  if (formatting.italic) marks.italic = true
+  if (formatting.underline) marks.underline = true
+  if (formatting.strike) marks.strike = true
+  if (formatting.color) marks.color = { rgb: formatting.color }
+  if (formatting.fontFamily) {
+    marks.fontFamily = { ascii: formatting.fontFamily, hAnsi: formatting.fontFamily }
+  }
+  if (formatting.fontSize) {
+    const n = Number.parseFloat(String(formatting.fontSize).replace(/pt$/i, ''))
+    if (!Number.isNaN(n)) marks.fontSize = n
+  }
+  if (formatting.highlight && formatting.highlight !== 'none') {
+    marks.highlight = formatting.highlight
+  }
+  return marks
+}
+
 export function executeToolCall(
-  editor: Editor,
+  editor: WordCloneEditorRef,
   name: string,
   args: Record<string, unknown>
 ): unknown {
@@ -91,11 +125,17 @@ export function executeToolCall(
     case 'insert_block':
       return executeInsertBlock(editor, args)
 
+    case 'insert_blocks':
+      return executeInsertBlocks(editor, args)
+
     case 'insert_list':
       return executeInsertList(editor, args)
 
     case 'delete_blocks':
       return executeDeleteBlocks(editor, args)
+
+    case 'batch_edit':
+      return executeBatchEdit(editor, args)
 
     case 'format_text':
       return executeFormatText(editor, args)
@@ -119,11 +159,13 @@ export function executeToolCall(
       return executeSetPageNumbers(editor, args)
 
     default:
-      return { error: `Unknown tool: ${name}` }
+      return {
+        error: `Unknown tool: "${name}". Edit tools: insert_block, insert_blocks, batch_edit, replace_block (full/range/patch modes), insert_list, delete_blocks, format_text, apply_style. Read tools: get_table_of_contents, read_blocks, read_section, read_selection, search_document. Call the correct tool name.`
+      }
   }
 }
 
-function executeReplaceBlock(editor: Editor, args: Record<string, unknown>): unknown {
+function executeReplaceBlock(editor: WordCloneEditorRef, args: Record<string, unknown>): unknown {
   const blockId = args.blockId as string
   if (!blockId) return { error: 'blockId is required' }
 
@@ -138,12 +180,8 @@ function executeReplaceBlock(editor: Editor, args: Record<string, unknown>): unk
     return { error: 'Use one replace mode only: full (text), range, or patch.' }
   }
 
-  if (hasRange) {
-    return executeReplaceBlockRange(editor, blockId, args)
-  }
-  if (hasPatch) {
-    return executeReplaceBlockPatch(editor, blockId, args)
-  }
+  if (hasRange) return executeReplaceBlockRange(editor, blockId, args)
+  if (hasPatch) return executeReplaceBlockPatch(editor, blockId, args)
 
   const text = args.text as string
   if (text === undefined) {
@@ -157,36 +195,13 @@ function executeReplaceBlock(editor: Editor, args: Record<string, unknown>): unk
   const found = getBlockById(editor, blockId)
   if (!found) return { error: `Block ${blockId} not found` }
 
-  const newJson: any = { type: found.node.type.name }
-  if (text) {
-    if (['bulletList', 'orderedList'].includes(found.node.type.name)) {
-      newJson.type = 'paragraph'
-      newJson.content = [{ type: 'text', text }]
-    } else if (found.node.type.name === 'listItem') {
-      newJson.content = [{ type: 'paragraph', content: [{ type: 'text', text }] }]
-    } else {
-      newJson.content = [{ type: 'text', text }]
-    }
-  }
-
-  const preservedAttrs: Record<string, unknown> = {}
-  if (found.node.attrs.blockId) {
-    preservedAttrs.blockId = found.node.attrs.blockId
-  }
-  if (found.node.type.name === 'heading') {
-    preservedAttrs.level = found.node.attrs.level ?? 1
-  }
-  if (Object.keys(preservedAttrs).length > 0) {
-    newJson.attrs = preservedAttrs
-  }
-
-  const result = stageReplace(editor, blockId, newJson, description)
+  const result = stageReplace(editor, blockId, text, description)
   if (!result.success) return result
-  return { success: true, blockId, mode: 'full', charLength: found.node.textContent.length }
+  return { success: true, blockId, mode: 'full', charLength: found.text.length }
 }
 
 function executeReplaceBlockRange(
-  editor: Editor,
+  editor: WordCloneEditorRef,
   blockId: string,
   args: Record<string, unknown>
 ): unknown {
@@ -218,7 +233,7 @@ function executeReplaceBlockRange(
 }
 
 function executeReplaceBlockPatch(
-  editor: Editor,
+  editor: WordCloneEditorRef,
   blockId: string,
   args: Record<string, unknown>
 ): unknown {
@@ -229,128 +244,163 @@ function executeReplaceBlockPatch(
   const found = getBlockById(editor, blockId)
   if (!found) return { error: `Block ${blockId} not found` }
 
-  const occurrences = findTextOccurrences(editor, blockId, oldText)
-  if (!occurrences || occurrences.matches.length === 0) {
-    return {
-      error: `oldText not found in block ${blockId}. Re-read with read_blocks.`
-    }
+  const matches = findTextOccurrences(editor, blockId, oldText)
+  if (matches.length === 0) {
+    return { error: `oldText not found in block ${blockId}. Re-read with read_blocks.` }
   }
-  if (occurrences.matches.length > 1 && args.occurrence === undefined) {
+  if (matches.length > 1 && args.occurrence === undefined) {
     return {
-      error: `oldText matches ${occurrences.matches.length} times. Pass occurrence (1-${occurrences.matches.length}) or use range mode with offsets from read_blocks.`
+      error: `oldText matches ${matches.length} times. Pass occurrence (1-${matches.length}) or use range mode with offsets from read_blocks.`
     }
   }
 
   const idx = Math.max(1, occurrence) - 1
-  if (idx >= occurrences.matches.length) {
-    return {
-      error: `occurrence ${occurrence} out of range (${occurrences.matches.length} matches).`
-    }
+  if (idx >= matches.length) {
+    return { error: `occurrence ${occurrence} out of range (${matches.length} matches).` }
   }
 
-  const match = occurrences.matches[idx]
+  const match = matches[idx]
   const description = `Replace "${oldText.slice(0, 40)}${oldText.length > 40 ? '…' : ''}"`
   const result = stageReplaceRange(editor, blockId, match.from, match.to, newText, description)
   if (!result.success) return result
 
-  const charLength = found.node.textContent.length
   return {
     success: true,
     blockId,
     mode: 'patch',
-    startOffset: occurrences.flatPositions[idx],
-    endOffset: occurrences.flatPositions[idx] + oldText.length,
-    charLength: charLength + newText.length - oldText.length
+    startOffset: match.from,
+    endOffset: match.to,
+    charLength: found.text.length + newText.length - oldText.length
   }
 }
 
-function buildBlockJson(type: string, text: string): any {
-  let nodeType = type
-  let attrs = {}
-  if (type.startsWith('heading')) {
-    nodeType = 'heading'
-    attrs = { level: parseInt(type.replace('heading', ''), 10) || 1 }
-  }
-  return {
-    type: nodeType,
-    ...(Object.keys(attrs).length > 0 ? { attrs } : {}),
-    content: text ? [{ type: 'text', text }] : []
-  }
-}
-
-function executeInsertBlock(editor: Editor, args: Record<string, unknown>): unknown {
+function executeInsertBlock(editor: WordCloneEditorRef, args: Record<string, unknown>): unknown {
   const afterBlockId = args.afterBlockId as string
-  const type = (args.type as string) || 'paragraph'
   const text = (args.text as string) || ''
   const description = deriveSuggestionDescription('insert_block', args)
-
-  const newJson = buildBlockJson(type, text)
-  return stageInsert(editor, afterBlockId, newJson, description)
+  return stageInsert(editor, afterBlockId, text, description, {
+    blockType: args.type as string | undefined
+  })
 }
 
-function executeInsertList(editor: Editor, args: Record<string, unknown>): unknown {
-  const afterBlockId = args.afterBlockId as string
-  const listType = (args.listType as string) || 'bulletList'
-  const items = (args.items as string[]) || []
-  const description = deriveSuggestionDescription('insert_list', args)
+const MAX_INSERT_BLOCKS = 20
+const MAX_BATCH_EDITS = 15
 
-  const newJson = {
-    type: listType,
-    content: items.map((text) => ({
-      type: 'listItem',
-      content: [
-        {
-          type: 'paragraph',
-          content: text ? [{ type: 'text', text }] : []
-        }
-      ]
-    }))
+function executeInsertBlocks(editor: WordCloneEditorRef, args: Record<string, unknown>): unknown {
+  const blocks = (args.blocks as Array<Record<string, unknown>>) ?? []
+  if (blocks.length === 0) return { error: 'blocks array is required and must not be empty.' }
+  if (blocks.length > MAX_INSERT_BLOCKS) {
+    return { error: `Too many blocks (${blocks.length}). Maximum is ${MAX_INSERT_BLOCKS}.` }
   }
 
-  return stageInsert(editor, afterBlockId, newJson, description)
+  const inserted: Array<{ blockId?: string; afterBlockId: string; type?: string }> = []
+  let chainAnchor: string | undefined
+
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i]!
+    const afterBlockId =
+      i === 0 ? (block.afterBlockId as string) : (chainAnchor ?? (block.afterBlockId as string))
+    if (!afterBlockId) {
+      return {
+        error:
+          i === 0
+            ? `blocks[0] requires afterBlockId.`
+            : `blocks[${i}] could not resolve chain anchor from prior insert.`,
+        partial: inserted
+      }
+    }
+
+    const result = executeInsertBlock(editor, {
+      afterBlockId,
+      type: block.type,
+      text: block.text
+    }) as { success?: boolean; blockId?: string; error?: string }
+
+    if (!result.success || !result.blockId) {
+      return {
+        error: result.error ?? `insert_blocks failed at index ${i}.`,
+        failedAt: i,
+        partial: inserted
+      }
+    }
+
+    chainAnchor = result.blockId
+    inserted.push({
+      blockId: result.blockId,
+      afterBlockId,
+      type: block.type as string | undefined
+    })
+  }
+
+  return { success: true, count: inserted.length, inserted }
 }
 
-function executeDeleteBlocks(editor: Editor, args: Record<string, unknown>): unknown {
-  const blockIds = (args.blockIds as string[]) ?? []
-  const description = deriveSuggestionDescription('delete_blocks', args)
+function executeBatchEdit(editor: WordCloneEditorRef, args: Record<string, unknown>): unknown {
+  const edits = (args.edits as Array<Record<string, unknown>>) ?? []
+  if (edits.length === 0) return { error: 'edits array is required and must not be empty.' }
+  if (edits.length > MAX_BATCH_EDITS) {
+    return { error: `Too many edits (${edits.length}). Maximum is ${MAX_BATCH_EDITS}.` }
+  }
 
-  const sorted = [...blockIds].sort((a, b) => {
-    const posA = getBlockById(editor, a)?.pos ?? 0
-    const posB = getBlockById(editor, b)?.pos ?? 0
-    return posB - posA
-  })
+  const allowedOps = new Set(['replace_block', 'format_text', 'apply_style', 'delete_blocks'])
+  const results: unknown[] = []
 
-  return stageDelete(editor, sorted, description)
-}
+  for (let i = 0; i < edits.length; i++) {
+    const edit = edits[i]!
+    const op = edit.op as string
+    if (!op || !allowedOps.has(op)) {
+      return { error: `edits[${i}] has invalid op "${op ?? ''}".`, results }
+    }
 
-function applyFormattingToRange(
-  editor: Editor,
-  range: { from: number; to: number },
-  formatting: Record<string, unknown>
-): void {
-  editor.chain().focus().setTextSelection(range).run()
+    const { op: _op, ...opArgs } = edit
+    const result = executeToolCall(editor, op, opArgs)
+    const hasError = typeof result === 'object' && result !== null && 'error' in result
+    results.push({ index: i, op, ...(hasError ? { error: (result as { error: string }).error } : result) })
 
-  if (formatting.bold) editor.chain().focus().toggleBold().run()
-  if (formatting.italic) editor.chain().focus().toggleItalic().run()
-  if (formatting.underline) editor.chain().focus().toggleUnderline().run()
-  if (formatting.strike) editor.chain().focus().toggleStrike().run()
-  if (formatting.color) editor.chain().focus().setColor(formatting.color as string).run()
-  if (formatting.fontFamily) editor.chain().focus().setFontFamily(formatting.fontFamily as string).run()
-  if (formatting.fontSize) editor.chain().focus().setFontSize(formatting.fontSize as string).run()
-  if (formatting.highlight !== undefined) {
-    if (formatting.highlight === 'none' || !formatting.highlight) {
-      editor.chain().focus().unsetHighlight().run()
-    } else {
-      editor.chain().focus().setHighlight({ color: formatting.highlight as string }).run()
+    if (hasError) {
+      return {
+        success: false,
+        failedAt: i,
+        op,
+        error: (result as { error: string }).error,
+        results
+      }
     }
   }
+
+  return { success: true, count: results.length, results }
+}
+
+function executeInsertList(editor: WordCloneEditorRef, args: Record<string, unknown>): unknown {
+  const afterBlockId = args.afterBlockId as string
+  const items = (args.items as string[]) || []
+  const description = deriveSuggestionDescription('insert_list', args)
+  const text = items.map((item) => `• ${item}`).join('\n')
+  return stageInsert(editor, afterBlockId, text, description)
+}
+
+function executeDeleteBlocks(editor: WordCloneEditorRef, args: Record<string, unknown>): unknown {
+  const blockIds = (args.blockIds as string[]) ?? []
+  const description = deriveSuggestionDescription('delete_blocks', args)
+  return stageDelete(editor, blockIds, description)
+}
+
+function applyFormattingToBlock(
+  editor: WordCloneEditorRef,
+  blockId: string,
+  search: string | undefined,
+  formatting: Record<string, unknown>
+): void {
+  const marks = buildMarks(formatting)
+  if (Object.keys(marks).length === 0) return
+  editor.applyFormatting({ paraId: blockId, search, marks: marks as never })
 }
 
 function formatResultPayload(
   blockId: string,
   startOffset: number,
   endOffset: number,
-  editor?: Editor
+  editor?: WordCloneEditorRef
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     success: true,
@@ -365,7 +415,7 @@ function formatResultPayload(
   return payload
 }
 
-function executeFormatText(editor: Editor, args: Record<string, unknown>): unknown {
+function executeFormatText(editor: WordCloneEditorRef, args: Record<string, unknown>): unknown {
   const formatting = (args.formatting as Record<string, unknown>) ?? {}
   const scope = ((args.scope as string) || 'text').toLowerCase()
 
@@ -381,11 +431,8 @@ function executeFormatText(editor: Editor, args: Record<string, unknown>): unkno
     for (const blockId of ids) {
       const content = getBlockContentRange(editor, blockId)
       if ('error' in content) return { error: content.error }
-
-      const range = { from: content.from, to: content.to }
-      const beforeContent = editor.state.doc.slice(range.from, range.to).toJSON()
-      applyFormattingToRange(editor, range, formatting)
-      stageFormatRange(editor, blockId, range.from, range.to, 'Format block', { beforeContent })
+      applyFormattingToBlock(editor, blockId, undefined, formatting)
+      stageFormatRange(editor, blockId, 0, content.charLength, 'Format block')
       results.push(formatResultPayload(blockId, 0, content.charLength, editor))
     }
 
@@ -405,10 +452,10 @@ function executeFormatText(editor: Editor, args: Record<string, unknown>): unkno
     const resolved = blockTextOffsetToRange(editor, blockId, startOffset, endOffset)
     if ('error' in resolved) return { error: resolved.error }
 
-    const range = { from: resolved.from, to: resolved.to }
-    const beforeContent = editor.state.doc.slice(range.from, range.to).toJSON()
-    applyFormattingToRange(editor, range, formatting)
-    stageFormatRange(editor, blockId, range.from, range.to, `Format range`, { beforeContent })
+    const text = findParagraphText(editor, blockId)
+    const search = text?.slice(resolved.from, resolved.to)
+    applyFormattingToBlock(editor, blockId, search, formatting)
+    stageFormatRange(editor, blockId, resolved.from, resolved.to, 'Format range')
 
     return formatResultPayload(blockId, startOffset, endOffset, editor)
   }
@@ -420,12 +467,10 @@ function executeFormatText(editor: Editor, args: Record<string, unknown>): unkno
     const resolved = runIndexToRange(editor, blockId, runIndex)
     if ('error' in resolved) return { error: resolved.error }
 
-    const range = { from: resolved.from, to: resolved.to }
-    const beforeContent = editor.state.doc.slice(range.from, range.to).toJSON()
-    applyFormattingToRange(editor, range, formatting)
-    stageFormatRange(editor, blockId, range.from, range.to, `Format run ${runIndex}`, {
-      beforeContent
-    })
+    const text = findParagraphText(editor, blockId)
+    const search = text?.slice(resolved.startOffset, resolved.endOffset)
+    applyFormattingToBlock(editor, blockId, search, formatting)
+    stageFormatRange(editor, blockId, resolved.from, resolved.to, `Format run ${runIndex}`)
 
     return formatResultPayload(blockId, resolved.startOffset, resolved.endOffset, editor)
   }
@@ -440,223 +485,90 @@ function executeFormatText(editor: Editor, args: Record<string, unknown>): unkno
   }
 
   const occurrence = (args.occurrence as number) ?? 1
-  const occurrences = findTextOccurrences(editor, blockId, searchText)
-  if (!occurrences || occurrences.matches.length === 0) {
+  const matches = findTextOccurrences(editor, blockId, searchText)
+  if (matches.length === 0) {
     return { error: `searchText not found in block ${blockId}. Re-read with read_blocks.` }
   }
-  if (occurrences.matches.length > 1 && args.occurrence === undefined) {
+  if (matches.length > 1 && args.occurrence === undefined) {
     return {
-      error: `searchText matches ${occurrences.matches.length} times. Pass occurrence (1-${occurrences.matches.length}) or use scope "range" with charStart/charEnd from read_blocks.`
+      error: `searchText matches ${matches.length} times. Pass occurrence (1-${matches.length}) or use scope "range" with offsets from read_blocks.`
     }
   }
 
   const idx = Math.max(1, occurrence) - 1
-  if (idx >= occurrences.matches.length) {
-    return { error: `occurrence ${occurrence} out of range (${occurrences.matches.length} matches).` }
+  if (idx >= matches.length) {
+    return { error: `occurrence ${occurrence} out of range (${matches.length} matches).` }
   }
 
-  const match = occurrences.matches[idx]
-  const startOffset = occurrences.flatPositions[idx]
-  const endOffset = startOffset + searchText.length
-  const beforeContent = editor.state.doc.slice(match.from, match.to).toJSON()
+  const match = matches[idx]
+  const text = findParagraphText(editor, blockId)
+  const search = text?.slice(match.from, match.to)
+  applyFormattingToBlock(editor, blockId, search, formatting)
+  stageFormatRange(editor, blockId, match.from, match.to, 'Format text')
 
-  applyFormattingToRange(editor, match, formatting)
-  stageFormatRange(editor, blockId, match.from, match.to, 'Format text', { beforeContent })
-
-  return formatResultPayload(blockId, startOffset, endOffset, editor)
+  return formatResultPayload(blockId, match.from, match.to, editor)
 }
 
-function applyBlockStyleAttrs(
-  editor: Editor,
-  blockId: string,
-  blockStyle: Record<string, unknown>
-): boolean {
-  const found = getBlockById(editor, blockId)
-  if (!found) return false
-
-  const blockFrom = found.pos
-  const blockTo = found.pos + found.node.nodeSize
-  editor.chain().focus().setTextSelection({ from: blockFrom + 1, to: blockTo - 1 }).run()
-
-  const chain = editor.chain().focus()
-  if (blockStyle.textAlign) {
-    chain.setTextAlign(blockStyle.textAlign as string)
-  }
-  if (blockStyle.lineSpacing) {
-    chain.setLineSpacing(blockStyle.lineSpacing as string)
-  }
-  return chain.run()
-}
-
-function executeApplyStyle(editor: Editor, args: Record<string, unknown>): unknown {
+function executeApplyStyle(editor: WordCloneEditorRef, args: Record<string, unknown>): unknown {
   const blockId = args.blockId as string
   const style = args.style as string | undefined
-  const blockStyle = args.blockStyle as Record<string, unknown> | undefined
 
   if (!blockId) return { error: 'blockId is required' }
-  if (!style && !blockStyle) {
-    return { error: 'Provide style and/or blockStyle (textAlign, lineSpacing).' }
-  }
+  if (!style) return { error: 'Provide style (paragraph, heading1, heading2, heading3).' }
 
   const found = getBlockById(editor, blockId)
   if (!found) return { error: `Block ${blockId} not found` }
 
-  const blockFrom = found.pos
-  const blockTo = found.pos + found.node.nodeSize
-  const beforeContent = editor.state.doc.slice(blockFrom, blockTo).toJSON()
+  const styleId = styleIdFromName(style)
+  const ok = editor.setParagraphStyle({ paraId: blockId, styleId })
+  if (!ok) return { error: `Failed to apply style ${style}` }
 
-  if (style) {
-    editor.chain().focus().setTextSelection({ from: blockFrom + 1, to: blockTo - 1 }).run()
-
-    switch (style) {
-      case 'paragraph':
-        editor.chain().focus().setParagraph().run()
-        break
-      case 'heading1':
-        editor.chain().focus().toggleHeading({ level: 1 }).run()
-        break
-      case 'heading2':
-        editor.chain().focus().toggleHeading({ level: 2 }).run()
-        break
-      case 'heading3':
-        editor.chain().focus().toggleHeading({ level: 3 }).run()
-        break
-      case 'bulletList':
-        editor.chain().focus().toggleBulletList().run()
-        break
-      case 'orderedList':
-        editor.chain().focus().toggleOrderedList().run()
-        break
-      case 'blockquote':
-        editor.chain().focus().toggleBlockquote().run()
-        break
-      default:
-        return { error: `Unknown style: ${style}` }
-    }
-  }
-
-  if (blockStyle) {
-    applyBlockStyleAttrs(editor, blockId, blockStyle)
-  }
-
-  const applied: Record<string, unknown> = { success: true, blockId }
-  if (style) applied.applied = style
-  else if (blockStyle) applied.applied = 'blockStyle'
-
-  const charLength = getBlockCharLength(editor, blockId)
-  if (charLength != null) applied.charLength = charLength
-
-  const updated = getBlockById(editor, blockId)
-  const highlightFrom = updated?.pos ?? blockFrom
-  const highlightTo = updated ? updated.pos + updated.node.nodeSize : blockTo
-
-  const descParts: string[] = []
-  if (style) descParts.push(style)
-  if (blockStyle?.textAlign) descParts.push(`align ${blockStyle.textAlign}`)
-  if (blockStyle?.lineSpacing) descParts.push(`spacing ${blockStyle.lineSpacing}`)
-
-  stageFormatRange(editor, blockId, highlightFrom, highlightTo, `Apply ${descParts.join(', ')}`, {
-    beforeContent,
-    type: 'style'
-  })
-
-  return applied
+  stageFormatRange(editor, blockId, 0, found.text.length, `Apply ${style}`, { type: 'style' })
+  return { success: true, blockId, applied: style, charLength: found.text.length }
 }
 
-function executeInsertPageBreak(editor: Editor, args: Record<string, unknown>): unknown {
+function executeInsertPageBreak(editor: WordCloneEditorRef, args: Record<string, unknown>): unknown {
   const afterBlockId = args.afterBlockId as string
-  return stageInsert(
-    editor,
-    afterBlockId,
-    '<hr>',
-    deriveSuggestionDescription('insert_page_break', args)
-  )
+  const anchor = afterBlockId === '__start__'
+    ? collectParagraphSnapshots(editor)[0]?.paraId
+    : afterBlockId
+  if (!anchor) return { error: 'Could not resolve page break anchor.' }
+  const ok = editor.insertBreak({ paraId: anchor, type: 'page' })
+  return ok ? { success: true, afterBlockId } : { error: 'Failed to insert page break.' }
 }
 
-function buildTableHtml(rows: number, cols: number): string {
-  const headerCells = Array.from({ length: cols }, (_, i) => `<th>Header ${i + 1}</th>`).join('')
-  const bodyRows = Array.from({ length: rows - 1 }, (_, r) => {
-    const cells = Array.from({ length: cols }, (_, c) => `<td>Cell ${r + 1}-${c + 1}</td>`).join('')
-    return `<tr>${cells}</tr>`
-  }).join('')
-  return `<table><thead><tr>${headerCells}</tr></thead><tbody>${bodyRows}</tbody></table>`
-}
-
-function executeInsertTable(editor: Editor, args: Record<string, unknown>): unknown {
+function executeInsertTable(editor: WordCloneEditorRef, args: Record<string, unknown>): unknown {
   const afterBlockId = args.afterBlockId as string
   const rows = Math.max(1, (args.rows as number) ?? 3)
   const cols = Math.max(1, (args.cols as number) ?? 3)
   const description = deriveSuggestionDescription('insert_table', args)
-  const html = buildTableHtml(rows, cols)
-  return stageInsert(editor, afterBlockId, html, description)
+  const lines = [`[Table ${rows}x${cols}]`]
+  for (let r = 0; r < rows; r++) {
+    lines.push(Array.from({ length: cols }, (_, c) => `Cell ${r + 1}-${c + 1}`).join('\t'))
+  }
+  return stageInsert(editor, afterBlockId, lines.join('\n'), description)
 }
 
-function executeInsertImage(editor: Editor, args: Record<string, unknown>): unknown {
+function executeInsertImage(editor: WordCloneEditorRef, args: Record<string, unknown>): unknown {
   const afterBlockId = args.afterBlockId as string
   const src = args.src as string
   const alt = (args.alt as string) ?? ''
   const description = deriveSuggestionDescription('insert_image', args)
-  const html = `<img src="${src.replace(/"/g, '&quot;')}" alt="${alt.replace(/"/g, '&quot;')}" />`
-  return stageInsert(editor, afterBlockId, html, description)
+  return stageInsert(editor, afterBlockId, `[Image: ${alt || src}]`, description)
 }
 
-function executeSetPageSetup(editor: Editor, args: Record<string, unknown>): unknown {
-  const pageSize = args.pageSize as string | undefined
-  const orientation = args.orientation as string | undefined
-  const margins = args.margins as
-    | { top?: number; bottom?: number; left?: number; right?: number }
-    | undefined
-
-  const chain = editor.chain().focus()
-
-  const size = resolvePageSize(pageSize)
-  if (size) {
-    let w = size.width
-    let h = size.height
-    if (orientation === 'landscape') {
-      ;[w, h] = [h, w]
-    }
-    chain.updatePageWidth(w).updatePageHeight(h)
-  } else if (orientation === 'landscape') {
-    const letter = resolvePageSize('Letter')!
-    chain.updatePageWidth(letter.height).updatePageHeight(letter.width)
+function executeSetPageSetup(_editor: WordCloneEditorRef, args: Record<string, unknown>): unknown {
+  void args
+  return {
+    success: false,
+    error: 'Page setup is available through the Layout tab in a future release. Section properties are preserved from the opened .docx.'
   }
-
-  if (margins) {
-    chain.updateMargins({
-      top: margins.top ? inchToPx(margins.top) : inchToPx(1),
-      bottom: margins.bottom ? inchToPx(margins.bottom) : inchToPx(1),
-      left: margins.left ? inchToPx(margins.left) : inchToPx(1),
-      right: margins.right ? inchToPx(margins.right) : inchToPx(1)
-    })
-  }
-
-  chain.run()
-  return { success: true }
 }
 
-function executeSetPageNumbers(editor: Editor, args: Record<string, unknown>): unknown {
-  const position = args.position as string
-  const format = args.format as string
-
-  const chain = editor.chain().focus()
-
-  if (position.startsWith('footer')) {
-    const side = position.replace('footer-', '')
-    if (side === 'left' || side === 'center') {
-      chain.updateFooterContent(format, '')
-    } else {
-      chain.updateFooterContent('', format)
-    }
-  } else if (position.startsWith('header')) {
-    const side = position.replace('header-', '')
-    if (side === 'left' || side === 'center') {
-      chain.updateHeaderContent(format, '')
-    } else {
-      chain.updateHeaderContent('', format)
-    }
+function executeSetPageNumbers(_editor: WordCloneEditorRef, args: Record<string, unknown>): unknown {
+  void args
+  return {
+    success: false,
+    error: 'Page numbers are preserved from the opened .docx. Use Word to edit header/footer fields for now.'
   }
-
-  chain.run()
-  return { success: true }
 }
