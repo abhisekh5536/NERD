@@ -10,3 +10,6 @@ dist-electron
 !.vscode/launch.json
 .eslintcache
 .tmp
+# Large archives - never push (GitHub 100MB limit)
+*.zip
+NERD.zip
